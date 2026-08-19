@@ -9,6 +9,19 @@ from django.utils import timezone
 from datetime import timedelta
 from .models import CallQueueItem
 
+
+@api_view(['GET'])
+def server_status(request):
+    """
+    Health check endpoint to verify backend AI pipeline readiness.
+    Flutter/Android calls this before placing outbound calls.
+    """
+    return Response({
+        'status': 'ready',
+        'message': 'Whisper STT, Llama 3, and Edge TTS engines are fully initialized.'
+    }, status=status.HTTP_200_OK)
+
+
 @api_view(['GET', 'POST'])
 def call_queue_list(request):
     if request.method == 'GET':

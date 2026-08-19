@@ -1,6 +1,7 @@
 # calls/admin.py
 from django.contrib import admin
 from .models import CallQueueItem
+from .models import CompanyScript
 
 @admin.register(CallQueueItem)
 class CallQueueItemAdmin(admin.ModelAdmin):
@@ -41,3 +42,11 @@ class CallQueueItemAdmin(admin.ModelAdmin):
     @admin.action(description="Mark selected leads as FOLLOW_UP")
     def mark_as_followup(self, request, queryset):
         queryset.update(status='FOLLOW_UP')
+
+
+
+@admin.register(CompanyScript)
+class CompanyScriptAdmin(admin.ModelAdmin):
+    list_display = ('company_name', 'bot_name', 'is_active', 'updated_at')
+    list_filter = ('is_active',)
+    search_fields = ('company_name', 'company_details')

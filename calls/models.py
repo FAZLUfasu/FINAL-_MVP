@@ -74,3 +74,27 @@ class CallQueueItem(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.phone_number}) - {self.status}"
+    
+
+class CompanyScript(models.Model):
+    company_name = models.CharField(max_length=100, default="Brainex AI Solution")
+    bot_name = models.CharField(max_length=50, default="Alex")
+    
+    # Custom Greetings & Closings
+    opening_greeting = models.TextField(
+        default="Hello! This is Alex from Brainex AI. How can I assist you today?"
+    )
+    closing_statement = models.TextField(
+        default="Thank you for contacting Brainex AI. Have a great day ahead! Goodbye."
+    )
+    
+    # Knowledge Base / Company Info
+    company_details = models.TextField(
+        help_text="Enter pricing, services, working hours, FAQs, etc."
+    )
+    
+    is_active = models.BooleanField(default=True, help_text="Set as the active voice prompt")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.company_name} Script ({'Active' if self.is_active else 'Inactive'})"
