@@ -1,998 +1,583 @@
-# import subprocess
-# import os
-# import sys
-# import torch
-# import torchaudio
-# import soundfile as sf
-# import time
-# import io
-# import gc
-# import json
-# import re
-# import asyncio
-# import numpy as np
-# import edge_tts
-# import requests
-# from pydub import AudioSegment
-# from channels.generic.websocket import AsyncWebsocketConsumer
-# from channels.db import database_sync_to_async
-# import pydub
-
-# # Point pydub directly to your WinGet ffmpeg / ffprobe binaries
-# pydub.AudioSegment.converter = r"C:\Users\hp\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
-# pydub.AudioSegment.ffprobe = r"C:\Users\hp\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe"
-
-# # ⚡ Enable PyTorch CPU Multi-Threading for Fast Inference
-# num_cores = os.cpu_count() or 4
-# torch.set_num_threads(num_cores)
-# torch.set_num_interop_threads(num_cores)
-
-# # Patching torchaudio load for systems with missing FFmpeg DLLs
-# def patched_torchaudio_load(filepath, *args, **kwargs):
-#     data, samplerate = sf.read(filepath, dtype='float32')
-#     tensor = torch.from_numpy(data).t()
-#     if tensor.ndim == 1:
-#         tensor = tensor.unsqueeze(0)
-#     return tensor, samplerate
-
-# torchaudio.load = patched_torchaudio_load
-# os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-
-# from calls.models import CallSession, CompanyScript, SalesInsight, Contact
-# from faster_whisper import WhisperModel
-# import ollama
-
-# print("🧠 Loading Whisper Speech Engine inside Django...")
-# # Quantized tiny model with VAD enabled
-# whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
-# print("✅ Whisper Bound to Django App!")
-
-# print("🎙️ Initializing Ultra-Fast Edge Neural Voice Engine...")
-# def initialize_llama_engine():
-#     print("🦙 Checking Llama Engine Status...")
-#     try:
-#         # Check if Ollama service is active
-#         res = requests.get("http://127.0.0.1:11434/api/tags", timeout=1.5)
-#         if res.status_code == 200:
-#             print("✅ Llama Engine Online & Bound to Pipeline!")
-#             return
-#     except Exception:
-#         print("🚀 Llama Engine not detected. Auto-launching Ollama background process...")
-
-#     try:
-#         # Launch Ollama in the background automatically
-#         subprocess.Popen(
-#             ["ollama", "run", "llama3.2"],
-#             stdout=subprocess.DEVNULL,
-#             stderr=subprocess.DEVNULL,
-#             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-#         )
-#         time.sleep(2)
-#         print("✅ Llama Engine automatically started & bound!")
-#     except FileNotFoundError:
-#         print("❌ Could not auto-start Llama! Ensure Ollama is installed and added to PATH.")
-#     except Exception as e:
-#         print(f"❌ Error auto-starting Llama: {e}")
-
-# # Run Llama initialization on module load
-# initialize_llama_engine()
-
-# async def generate_voice_pcm_bytes(text: str) -> bytes:
-#     """Generates natural human neural voice and converts MP3 to raw 16kHz PCM 16-bit mono for phone baseband."""
-#     cleaned_text = re.sub(r"[^\w\s.,?!']", "", text).strip()
-    
-#     if not cleaned_text or len(cleaned_text) < 3:
-#         return b""
-        
-#     if len(cleaned_text) > 250:
-#         cleaned_text = cleaned_text[:250]
-        
-#     if cleaned_text[-1] not in [".", "!", "?", ","]:
-#         cleaned_text += "."
-
-#     try:
-#         # 1. Fetch MP3 audio stream from Edge-TTS
-#         communicate = edge_tts.Communicate(cleaned_text, "en-US-GuyNeural")
-#         mp3_io = io.BytesIO()
-#         async for chunk in communicate.stream():
-#             if chunk["type"] == "audio":
-#                 mp3_io.write(chunk["data"])
-        
-#         mp3_io.seek(0)
-        
-#         # 2. Convert MP3 to 16kHz PCM 16-bit Mono (Required for SIM Call Uplink)
-#         audio = AudioSegment.from_file(mp3_io, format="mp3")
-#         audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-        
-#         return audio.raw_data
-
-#     except Exception as e:
-#         print(f"⚠️ Voice generation exception: {e}")
-#         return b""
-
-
-# def split_into_sentences(text_buffer):
-#     sentences = re.split(r'(?<=[.!?])\s+', text_buffer)
-#     if len(sentences) > 1:
-#         return sentences[:-1], sentences[-1]
-#     return [], text_buffer
-
-
-# class MediaStreamConsumer(AsyncWebsocketConsumer):
-
-#     async def connect(self):
-#         try:
-#             await self.accept()
-#             self.is_connected = True
-#             self.greeting_sent = False  # Guard flag to prevent duplicate greetings
-#             self.client_phone = None
-#             self.session_id = None
-#             self.lead_details = ""
-#             self.call_transcript_log = []
-#             self.start_time = time.time()
-            
-#             # 🔑 REAL-TIME VAD & BUFFER PARAMETERS (16kHz, 16-bit Mono = 32,000 bytes/sec)
-#             self.audio_buffer = bytearray()
-#             self.silence_start_time = None
-#             self.is_user_talking = False
-#             self.ENERGY_THRESHOLD = 300       # Sensitivity cutoff for voice presence
-#             self.SILENCE_DURATION_SEC = 0.8  # Dispatch STT after 800ms of post-speech silence
-#             self.MAX_BUFFER_BYTES = 128000    # Hard cap (~4 seconds) to prevent huge Whisper latencies
-            
-#             self.INACTIVITY_TIMEOUT_SECONDS = 120.0
-#             self.last_activity_time = time.time()
-            
-#             self.timeout_checker_task = asyncio.create_task(self.monitor_inactivity_timeout())
-#             print("🌐 [WS CONNECT] Single synchronized pipeline channel established.")
-#         except Exception as e:
-#             print(f"❌ [WS CONNECT ERROR]: {e}")
-#             await self.close()
-
-#     async def monitor_inactivity_timeout(self):
-#         try:
-#             while self.is_connected:
-#                 await asyncio.sleep(5)
-#                 current_time = time.time()
-#                 if (current_time - self.last_activity_time) > self.INACTIVITY_TIMEOUT_SECONDS:
-#                     print("⏰ [TIMEOUT] Inactivity threshold hit. Terminating call session.")
-#                     await self.safe_send({"event": "ai_token", "text": "[SESSION TIMEOUT]"})
-#                     await self.close()
-#                     break
-#         except asyncio.CancelledError:
-#             pass
-
-#     async def disconnect(self, close_code):
-#         self.is_connected = False
-#         self.greeting_sent = False
-#         if hasattr(self, 'timeout_checker_task'):
-#             self.timeout_checker_task.cancel()
-            
-#         duration = time.time() - self.start_time
-#         print(f"🔌 [WS DISCONNECT] Connection severed safely. Code: {close_code}")
-        
-#         if self.session_id:
-#             asyncio.create_task(self.finalize_call_session(self.session_id, duration, self.call_transcript_log))
-        
-#         self.audio_buffer.clear()
-
-#     async def receive(self, text_data=None, bytes_data=None):
-#         self.last_activity_time = time.time()
-
-#         # ------------------------------------------------------------------
-#         # 1. HANDLE JSON / TEXT TELEMETRY & CONTROL MESSAGES
-#         # ------------------------------------------------------------------
-#         if text_data:
-#             try:
-#                 parsed_json = json.loads(text_data)
-                
-#                 # Metadata initialization
-#                 if "client_phone_number" in parsed_json or parsed_json.get("event") == "client_phone_number":
-#                     self.client_phone = parsed_json.get("client_phone_number")
-#                     self.lead_details = parsed_json.get("lead_details", parsed_json.get("details", ""))
-#                     self.session_id = await self.create_call_session(self.client_phone)
-#                     print(f"📱 [METADATA BOUND] Session active. Phone ID: {self.client_phone} | Details: {self.lead_details}")
-                    
-#                     # Immediate greeting trigger upon metadata binding if line is active
-#                     if not self.greeting_sent:
-#                         self.greeting_sent = True
-#                         asyncio.create_task(self.trigger_initial_greeting())
-#                     return
-
-#                 # Explicit call answered signal
-#                 if parsed_json.get("event") == "call_answered":
-#                     if not self.greeting_sent:
-#                         self.greeting_sent = True
-#                         print("✅ [CALL ANSWERED] Line active! Triggering initial greeting...")
-#                         asyncio.create_task(self.trigger_initial_greeting())
-#                     return
-
-#                 # Telemetry
-#                 if parsed_json.get("event") == "call_state_changed":
-#                     state = parsed_json.get("state")
-#                     print(f"📞 [TELEMETRY REGISTRY] Hardware Line Changed: {state}")
-#                     return
-
-#                 # Text Injection
-#                 user_text = parsed_json.get("text", parsed_json.get("message", parsed_json.get("prompt", ""))).strip()
-#                 if user_text and user_text not in ["HELLO_SERVER", "__SYSTEM_CONNECTION_INITIALIZED__"]:
-#                     asyncio.create_task(self.process_text_inference(user_text))
-
-#             except json.JSONDecodeError:
-#                 clean_text = text_data.strip()
-#                 if clean_text and not clean_text.startswith("{"):
-#                     asyncio.create_task(self.process_text_inference(clean_text))
-#             except Exception as e:
-#                 print(f"⚠️ [RECEIVE ERROR]: {e}")
-
-#         # ------------------------------------------------------------------
-#         # 2. HANDLE BINARY AUDIO CHUNKS (STREAMING PCM)
-#         # ------------------------------------------------------------------
-#         elif bytes_data:
-#             if not self.is_connected:
-#                 return
-                
-#             self.audio_buffer.extend(bytes_data)
-#             audio_frame = np.frombuffer(bytes_data, dtype=np.int16)
-            
-#             if len(audio_frame) == 0:
-#                 return
-
-#             rms_energy = np.sqrt(np.mean(audio_frame.astype(np.float32)**2))
-#             current_time = time.time()
-
-#             # Voice Activity Detection (VAD) Logic
-#             if rms_energy > self.ENERGY_THRESHOLD:
-#                 self.is_user_talking = True
-#                 self.silence_start_time = None
-#             else:
-#                 if self.is_user_talking and self.silence_start_time is None:
-#                     self.silence_start_time = current_time
-
-#             # Calculate silence duration
-#             silence_duration = (current_time - self.silence_start_time) if self.silence_start_time else 0.0
-
-#             # Dispatch buffer if silence interval met OR hard size cap reached
-#             should_dispatch = (
-#                 (self.is_user_talking and silence_duration >= self.SILENCE_DURATION_SEC) or
-#                 (len(self.audio_buffer) >= self.MAX_BUFFER_BYTES)
-#             )
-
-#             if should_dispatch and len(self.audio_buffer) > 8000:
-#                 print(f"🎙️ [SPEECH CHUNK READY] Processing {len(self.audio_buffer)} bytes...")
-#                 raw_buffer = bytes(self.audio_buffer)
-#                 self.audio_buffer.clear()
-#                 self.is_user_talking = False
-#                 self.silence_start_time = None
-                
-#                 asyncio.create_task(self.process_audio_transcription(raw_buffer))
-
-#     async def trigger_initial_greeting(self):
-#         """Fetches active opening greeting and speaks it when line opens."""
-#         await asyncio.sleep(0.4)
-#         script_data = await self.get_active_script()
-        
-#         greeting_text = script_data['greeting'] if script_data else "Hello! How can I help you today?"
-        
-#         if self.is_connected:
-#             print(f"🗣️ [INITIAL GREETING]: {greeting_text}")
-#             self.call_transcript_log.append(f"AI Agent: {greeting_text}")
-            
-#             await self.safe_send({
-#                 "type": "ai_response",
-#                 "sender": "AI",
-#                 "text": greeting_text
-#             })
-            
-#             pcm_bytes = await generate_voice_pcm_bytes(greeting_text)
-#             if pcm_bytes and self.is_connected:
-#                 await self.send(bytes_data=pcm_bytes)
-
-        
-#     async def process_audio_transcription(self, raw_audio_bytes):
-#         """Transcribes incoming 16-bit PCM 16kHz mono audio."""
-
-#         try:
-
-#             # ==========================================================
-#             # PCM → INT16
-#             # ==========================================================
-
-#             pcm_int16 = np.frombuffer(
-#                 raw_audio_bytes,
-#                 dtype=np.int16
-#             )
-
-#             if len(pcm_int16) == 0:
-#                 print("⚠️ [WHISPER] Empty PCM buffer")
-#                 return
-
-#             # ==========================================================
-#             # PCM DEBUG
-#             # ==========================================================
-
-#             max_amp = int(
-#                 np.max(
-#                     np.abs(pcm_int16)
-#                 )
-#             )
-
-#             rms = float(
-#                 np.sqrt(
-#                     np.mean(
-#                         pcm_int16.astype(np.float32) ** 2
-#                     )
-#                 )
-#             )
-
-#             duration = len(pcm_int16) / 16000.0
-
-#             print(
-#                 f"🔊 [WHISPER PCM] "
-#                 f"bytes={len(raw_audio_bytes)} "
-#                 f"samples={len(pcm_int16)} "
-#                 f"duration={duration:.2f}s "
-#                 f"max_amp={max_amp} "
-#                 f"rms={rms:.2f}"
-#             )
-
-#             # ==========================================================
-#             # INT16 → FLOAT32
-#             # ==========================================================
-
-#             final_audio = (
-#                 pcm_int16.astype(np.float32) / 32768.0
-#             )
-
-#             # ==========================================================
-#             # WHISPER
-#             # ==========================================================
-
-#             segments, info = await asyncio.to_thread(
-#                 whisper_model.transcribe,
-#                 final_audio,
-#                 beam_size=1,
-#                 language="en",
-#                 no_speech_threshold=0.4,
-#                 vad_filter=True,
-#                 vad_parameters={
-#                     "min_silence_duration_ms": 500
-#                 }
-#             )
-
-#             user_text = "".join(
-#                 segment.text
-#                 for segment in segments
-#             ).strip()
-
-#             # ==========================================================
-#             # RESULT
-#             # ==========================================================
-
-#             clean_check = re.sub(
-#                 r"[^\w\s]",
-#                 "",
-#                 user_text.lower()
-#             ).strip()
-
-#             hallucinations = [
-#                 "you",
-#                 "you you",
-#                 "thank you",
-#                 "subtitles",
-#                 "bye",
-#                 "amaraorg",
-#                 "mb",
-#                 "thank you for watching"
-#             ]
-
-#             if (
-#                 user_text
-#                 and len(clean_check) >= 2
-#                 and clean_check not in hallucinations
-#             ):
-
-#                 print(
-#                     f"🗣️ [WHISPER TRANSCRIPT]: {user_text}"
-#                 )
-
-#                 if (
-#                     hasattr(self, "is_connected")
-#                     and self.is_connected
-#                 ):
-
-#                     asyncio.create_task(
-#                         self.process_text_inference(
-#                             user_text
-#                         )
-#                     )
-
-#             else:
-
-#                 print(
-#                     f"⚠️ [WHISPER IGNORED]: "
-#                     f"Ignored empty or hallucinated audio: "
-#                     f"'{user_text}'"
-#                 )
-
-#         except Exception as e:
-
-#             print(
-#                 f"❌ [TRANSCRIPTION FAIL]: {e}"
-#             )
-#     async def process_text_inference(self, user_text):
-#         print(f"🤖 [LLAMA TRIGGERED] Generating response for: '{user_text}'")
-#         self.call_transcript_log.append(f"Customer: {user_text}")
-        
-#         await self.safe_send({
-#             "type": "user_transcript",
-#             "sender": "Customer",
-#             "text": user_text
-#         })
-
-#         script_data = await self.get_active_script()
-        
-#         if script_data:
-#             system_prompt = (
-#                 f"You are {script_data['bot_name']}, an AI Sales Representative for {script_data['company']}.\n"
-#                 f"KNOWLEDGE BASE:\n{script_data['details']}\n\n"
-#                 f"RULES:\n"
-#                 f"1. GREETING: '{script_data['greeting']}'\n"
-#                 f"2. CLOSING: '{script_data['closing']}'\n"
-#                 f"3. Keep answers under 2 concise, natural conversational sentences."
-#             )
-#         else:
-#             system_prompt = "You are a helpful AI sales assistant. Keep responses under 2 sentences."
-
-#         prompt_context = f"{system_prompt}\n\nLead Context: {self.lead_details}\nCustomer: {user_text}\nAI:"
-
-#         def _run_ollama():
-#             try:
-#                 # Use stream=False inside thread for immediate response generation
-#                 res = ollama.generate(model="llama3.2", prompt=prompt_context, stream=False)
-#                 return res.get("response", "").strip()
-#             except Exception as e:
-#                 print(f"❌ [OLLAMA MODEL ERROR]: {e}")
-#                 # Fallback to llama3 if llama3.2 is not pulled
-#                 try:
-#                     res = ollama.generate(model="llama3", prompt=prompt_context, stream=False)
-#                     return res.get("response", "").strip()
-#                 except Exception as fallback_err:
-#                     print(f"❌ [OLLAMA FALLBACK ERROR]: {fallback_err}")
-#                     return "I understand. How else can I assist you?"
-
-#         try:
-#             full_ai_response = await asyncio.to_thread(_run_ollama)
-            
-#             if full_ai_response and self.is_connected:
-#                 print(f"🗣️ [AI RESPONSE]: {full_ai_response}")
-#                 self.call_transcript_log.append(f"AI Agent: {full_ai_response}")
-                
-#                 # Send text response to Flutter Call UI
-#                 await self.safe_send({
-#                     "type": "ai_response",
-#                     "sender": "AI",
-#                     "text": full_ai_response
-#                 })
-
-#                 # Convert AI response to PCM bytes and stream over cellular line
-#                 pcm_bytes = await generate_voice_pcm_bytes(full_ai_response)
-#                 if pcm_bytes and self.is_connected:
-#                     await self.send(bytes_data=pcm_bytes)
-
-#         except Exception as e:
-#             print(f"⚠️ [INFERENCE EXCEPTION]: {e}")
-
-#     async def safe_send(self, payload: dict):
-#         if hasattr(self, 'is_connected') and self.is_connected:
-#             try:
-#                 await self.send(text_data=json.dumps(payload))
-#             except Exception as e:
-#                 print(f"⚠️ [SEND SKIPPED]: Socket closed ({e})")
-#                 self.is_connected = False
-
-#     @database_sync_to_async
-#     def create_call_session(self, phone_number):
-#         try:
-#             if not phone_number:
-#                 return None
-#             contact, _ = Contact.objects.get_or_create(phone_number=phone_number)
-#             session = CallSession.objects.create(contact=contact, status="active")
-#             return session.id
-#         except Exception as e:
-#             print(f"⚠️ [DB CREATE SESSION ERROR]: {e}")
-#             return None
-
-#     @database_sync_to_async
-#     def finalize_call_session(self, session_id, duration, transcript_log):
-#         try:
-#             if not session_id:
-#                 return
-#             session = CallSession.objects.get(id=session_id)
-#             session.duration_seconds = int(duration)
-#             session.status = "completed"
-#             session.save()
-#             print(f"✅ [DB SESSION SAVED] ID: {session_id} | Duration: {int(duration)}s")
-#         except Exception as e:
-#             print(f"⚠️ [DB FINALIZE ERROR]: {e}")
-
-#     @database_sync_to_async
-#     def get_active_script(self):
-#         """Fetches active script parameters from Django DB."""
-#         try:
-#             script = CompanyScript.objects.filter(is_active=True).first()
-#             if script:
-#                 return {
-#                     "bot_name": script.bot_name,
-#                     "company": script.company_name,
-#                     "details": script.company_details,
-#                     "greeting": script.opening_greeting,
-#                     "closing": script.closing_statement
-#                 }
-#         except Exception as e:
-#             print(f"⚠️ [DB SCRIPT FETCH ERROR]: {e}")
-#         return None
-
-import subprocess
+import asyncio
+import gc
+import io
+import json
 import os
+import re
+import subprocess
 import sys
+import time
+import warnings
+import wave
+
+# 🟢 Suppress non-critical PyTorch, TTS, and Transformer warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="TTS.*")
+warnings.filterwarnings("ignore", message=".*attention_mask.*")
+
+# Set CPU thread limits prior to loading AI frameworks
+num_cores = str(os.cpu_count() or 4)
+os.environ["OMP_NUM_THREADS"] = num_cores
+os.environ["MKL_NUM_THREADS"] = num_cores
+
+from channels.db import database_sync_to_async
+from channels.generic.websocket import AsyncWebsocketConsumer
+from django.core.files.base import ContentFile
+from faster_whisper import WhisperModel
+import numpy as np
+import ollama
+from pydub import AudioSegment
+import requests
+import soundfile as sf
 import torch
 import torchaudio
-import soundfile as sf
-import time
-import io
-import gc
-import json
-import re
-import asyncio
-import numpy as np
-import edge_tts
-import requests
-from pydub import AudioSegment
-from channels.generic.websocket import AsyncWebsocketConsumer
-from channels.db import database_sync_to_async
-import pydub
+from TTS.api import TTS
+
+from calls.models import CallSession, CompanyScript, Contact, SalesInsight
 
 # Configure pydub binaries for Windows environment
-pydub.AudioSegment.converter = r"C:\Users\hp\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
-pydub.AudioSegment.ffprobe = r"C:\Users\hp\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe"
+AudioSegment.converter = (
+    r"C:\Users\hp\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
+)
+AudioSegment.ffprobe = (
+    r"C:\Users\hp\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe"
+)
 
-# Enable PyTorch CPU Multi-Threading for Fast Inference
-num_cores = os.cpu_count() or 4
-torch.set_num_threads(num_cores)
-torch.set_num_interop_threads(num_cores)
 
-# Patching torchaudio load for systems with missing FFmpeg DLLs
+# Patch torchaudio load for systems with missing FFmpeg DLLs
 def patched_torchaudio_load(filepath, *args, **kwargs):
-    data, samplerate = sf.read(filepath, dtype='float32')
-    tensor = torch.from_numpy(data).t()
-    if tensor.ndim == 1:
-        tensor = tensor.unsqueeze(0)
-    return tensor, samplerate
+  data, samplerate = sf.read(filepath, dtype="float32")
+  tensor = torch.from_numpy(data).t()
+  if tensor.ndim == 1:
+    tensor = tensor.unsqueeze(0)
+  return tensor, samplerate
+
 
 torchaudio.load = patched_torchaudio_load
 os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
 
-from calls.models import CallSession, CompanyScript, SalesInsight, Contact
-from faster_whisper import WhisperModel
-import ollama
-
 print("🧠 Loading Whisper Speech Engine inside Django...")
-# Quantized tiny model with VAD enabled
 whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 print("✅ Whisper Bound to Django App!")
 
-print("🎙️ Initializing Ultra-Fast Edge Neural Voice Engine...")
+print("🗣️ Loading Coqui XTTS v2 Voice Cloning Model...")
+custom_tts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(
+    "cpu"
+)
+print("✅ Voice Cloning Engine Online!")
+
+# Resolve path to custom_voice.wav in project root
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CUSTOM_VOICE_SAMPLE = os.path.join(BASE_DIR, "custom_voice.wav")
+
 
 def initialize_llama_engine():
-    print("🦙 Checking Llama Engine Status...")
-    try:
-        # Check if Ollama service is active
-        res = requests.get("http://127.0.0.1:11434/api/tags", timeout=1.5)
-        if res.status_code == 200:
-            print("✅ Llama Engine Online & Bound to Pipeline!")
-            return
-    except Exception:
-        print("🚀 Llama Engine not detected. Auto-launching Ollama background process...")
+  print("🦙 Checking Llama Engine Status...")
+  try:
+    res = requests.get("http://127.0.0.1:11434/api/tags", timeout=1.5)
+    if res.status_code == 200:
+      print("✅ Llama Engine Online & Bound to Pipeline!")
+      return
+  except Exception:
+    print("🚀 Llama Engine not detected. Auto-launching background process...")
 
-    try:
-        # Launch Ollama in the background automatically
-        subprocess.Popen(
-            ["ollama", "run", "llama3.2"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        )
-        time.sleep(2)
-        print("✅ Llama Engine automatically started & bound!")
-    except FileNotFoundError:
-        print("❌ Could not auto-start Llama! Ensure Ollama is installed and added to PATH.")
-    except Exception as e:
-        print(f"❌ Error auto-starting Llama: {e}")
+  try:
+    subprocess.Popen(
+        ["ollama", "run", "llama3.2"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=(
+            subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        ),
+    )
+    time.sleep(2)
+    print("✅ Llama Engine automatically started & bound!")
+  except Exception as e:
+    print(f"❌ Error auto-starting Llama: {e}")
 
-# Run Llama initialization on module load
+
 initialize_llama_engine()
 
 
 async def generate_voice_pcm_bytes(text: str) -> bytes:
-    """Generates natural human neural voice and converts MP3 to raw 16kHz PCM 16-bit mono for phone baseband."""
-    cleaned_text = re.sub(r"[^\w\s.,?!']", "", text).strip()
-    
-    if not cleaned_text or len(cleaned_text) < 3:
-        return b""
-        
-    if len(cleaned_text) > 250:
-        cleaned_text = cleaned_text[:250]
-        
-    if cleaned_text[-1] not in [".", "!", "?", ","]:
-        cleaned_text += "."
+  """Generates cloned speech using Coqui XTTS v2 and outputs 16kHz PCM 16-bit mono."""
+  cleaned_text = re.sub(r"[^\w\s.,?!']", "", text).strip()
 
-    try:
-        # 1. Fetch MP3 audio stream from Edge-TTS
-        communicate = edge_tts.Communicate(cleaned_text, "en-US-GuyNeural")
-        mp3_io = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                mp3_io.write(chunk["data"])
-        
-        mp3_io.seek(0)
-        
-        # 2. Convert MP3 to 16kHz PCM 16-bit Mono (Required for SIM Call Uplink)
-        def _convert_mp3_to_pcm(raw_mp3_bytes):
-            audio = AudioSegment.from_file(io.BytesIO(raw_mp3_bytes), format="mp3")
-            audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-            return audio.raw_data
+  if not cleaned_text or len(cleaned_text) < 2:
+    return b""
 
-        return await asyncio.to_thread(_convert_mp3_to_pcm, mp3_io.getvalue())
+  if len(cleaned_text) > 250:
+    cleaned_text = cleaned_text[:250]
 
-    except Exception as e:
-        print(f"⚠️ Voice generation exception: {e}")
-        return b""
+  if cleaned_text[-1] not in [".", "!", "?", ","]:
+    cleaned_text += "."
+
+  if not os.path.exists(CUSTOM_VOICE_SAMPLE):
+    print(f"❌ Custom voice sample missing at: {CUSTOM_VOICE_SAMPLE}")
+    return b""
+
+  try:
+
+    def _synthesize_cloned_voice():
+      output_wav = io.BytesIO()
+
+      # Faster inference configuration for CPU execution
+      custom_tts_model.tts_to_file(
+          text=cleaned_text,
+          speaker_wav=CUSTOM_VOICE_SAMPLE,
+          language="en",
+          speed=1.2,
+          gpt_cond_len=3,
+          file_path=output_wav,
+      )
+
+      output_wav.seek(0)
+      audio = AudioSegment.from_file(output_wav, format="wav")
+      audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+      raw_data = audio.raw_data
+
+      if len(raw_data) % 2 != 0:
+        raw_data = raw_data[:-1]
+
+      return raw_data
+
+    return await asyncio.to_thread(_synthesize_cloned_voice)
+
+  except Exception as e:
+    print(f"⚠️ Custom voice generation error: {e}")
+    return b""
 
 
-def split_into_sentences(text_buffer):
-    sentences = re.split(r'(?<=[.!?])\s+', text_buffer)
-    if len(sentences) > 1:
-        return sentences[:-1], sentences[-1]
-    return [], text_buffer
+def split_into_sentences(text_buffer: str):
+  sentences = re.split(r"(?<=[.!?])\s+", text_buffer)
+  if len(sentences) > 1:
+    return sentences[:-1], sentences[-1]
+  return [], text_buffer
 
 
 class MediaStreamConsumer(AsyncWebsocketConsumer):
 
-    async def connect(self):
-        try:
-            await self.accept()
-            self.is_connected = True
-            self.greeting_sent = False  # Guard flag to prevent duplicate greetings
-            self.client_phone = None
-            self.session_id = None
-            self.lead_details = ""
-            self.call_transcript_log = []
-            self.start_time = time.time()
-            
-            # 🔑 REAL-TIME VAD & BUFFER PARAMETERS (16kHz, 16-bit Mono = 32,000 bytes/sec)
-            self.audio_buffer = bytearray()
-            self.silence_start_time = None
-            self.is_user_talking = False
-            self.ENERGY_THRESHOLD = 300       # Sensitivity cutoff for voice presence
-            self.SILENCE_DURATION_SEC = 0.8  # Dispatch STT after 800ms of post-speech silence
-            self.MAX_BUFFER_BYTES = 128000    # Hard cap (~4 seconds) to prevent huge Whisper latencies
-            
-            self.INACTIVITY_TIMEOUT_SECONDS = 120.0
-            self.last_activity_time = time.time()
-            
-            self.timeout_checker_task = asyncio.create_task(self.monitor_inactivity_timeout())
-            print("🌐 [WS CONNECT] Single synchronized pipeline channel established.")
-        except Exception as e:
-            print(f"❌ [WS CONNECT ERROR]: {e}")
-            await self.close()
+  async def connect(self):
+    try:
+      await self.accept()
+      self.is_connected = True
+      self.greeting_sent = False
+      self.is_ai_speaking = False
+      self.client_phone = None
+      self.session_id = None
+      self.lead_details = ""
+      self.call_transcript_log = []
+      self.start_time = time.time()
 
-    async def monitor_inactivity_timeout(self):
-        try:
-            while self.is_connected:
-                await asyncio.sleep(5)
-                current_time = time.time()
-                if (current_time - self.last_activity_time) > self.INACTIVITY_TIMEOUT_SECONDS:
-                    print("⏰ [TIMEOUT] Inactivity threshold hit. Terminating call session.")
-                    await self.safe_send({"event": "ai_token", "text": "[SESSION TIMEOUT]"})
-                    await self.close()
-                    break
-        except asyncio.CancelledError:
-            pass
+      self.customer_pcm = bytearray()
+      self.ai_pcm = bytearray()
 
-    async def disconnect(self, close_code):
-        self.is_connected = False
-        self.greeting_sent = False
-        if hasattr(self, 'timeout_checker_task'):
-            self.timeout_checker_task.cancel()
-            
-        duration = time.time() - self.start_time
-        print(f"🔌 [WS DISCONNECT] Connection severed safely. Code: {close_code}")
-        
-        if self.session_id:
-            asyncio.create_task(self.finalize_call_session(self.session_id, duration, self.call_transcript_log))
-        
-        self.audio_buffer.clear()
+      self.audio_buffer = bytearray()
+      self.silence_start_time = None
+      self.is_user_talking = False
+      self.ENERGY_THRESHOLD = 15
+      self.SILENCE_DURATION_SEC = 0.5
+      self.MAX_BUFFER_BYTES = 32000
 
-    async def receive(self, text_data=None, bytes_data=None):
-        self.last_activity_time = time.time()
+      self.INACTIVITY_TIMEOUT_SECONDS = 120.0
+      self.last_activity_time = time.time()
 
-        # ------------------------------------------------------------------
-        # 1. HANDLE JSON / TEXT TELEMETRY & CONTROL MESSAGES
-        # ------------------------------------------------------------------
-        if text_data:
-            try:
-                parsed_json = json.loads(text_data)
-                
-                # Metadata initialization
-                if "client_phone_number" in parsed_json or parsed_json.get("event") == "client_phone_number":
-                    self.client_phone = parsed_json.get("client_phone_number")
-                    self.lead_details = parsed_json.get("lead_details", parsed_json.get("details", ""))
-                    self.session_id = await self.create_call_session(self.client_phone)
-                    print(f"📱 [METADATA BOUND] Session active. Phone ID: {self.client_phone} | Details: {self.lead_details}")
-                    
-                    # Immediate greeting trigger upon metadata binding if line is active
-                    if not self.greeting_sent:
-                        self.greeting_sent = True
-                        asyncio.create_task(self.trigger_initial_greeting())
-                    return
+      self.timeout_checker_task = asyncio.create_task(
+          self.monitor_inactivity_timeout()
+      )
+      print("🌐 [WS CONNECT] Single synchronized pipeline channel established.")
+    except Exception as e:
+      print(f"❌ [WS CONNECT ERROR]: {e}")
+      await self.close()
 
-                # Explicit call answered signal
-                if parsed_json.get("event") == "call_answered":
-                    if not self.greeting_sent:
-                        self.greeting_sent = True
-                        print("✅ [CALL ANSWERED] Line active! Triggering initial greeting...")
-                        asyncio.create_task(self.trigger_initial_greeting())
-                    return
+  async def monitor_inactivity_timeout(self):
+    try:
+      while self.is_connected:
+        await asyncio.sleep(5)
+        current_time = time.time()
+        if (
+            current_time - self.last_activity_time
+        ) > self.INACTIVITY_TIMEOUT_SECONDS:
+          print("⏰ [TIMEOUT] Inactivity threshold hit.")
+          await self.safe_send(
+              {"event": "ai_token", "text": "[SESSION TIMEOUT]"}
+          )
+          await self.close()
+          break
+    except asyncio.CancelledError:
+      pass
 
-                # Telemetry
-                if parsed_json.get("event") == "call_state_changed":
-                    state = parsed_json.get("state")
-                    print(f"📞 [TELEMETRY REGISTRY] Hardware Line Changed: {state}")
-                    return
+  async def disconnect(self, close_code):
+    self.is_connected = False
+    self.greeting_sent = False
+    if hasattr(self, "timeout_checker_task"):
+      self.timeout_checker_task.cancel()
 
-                # Text Injection
-                user_text = parsed_json.get("text", parsed_json.get("message", parsed_json.get("prompt", ""))).strip()
-                if user_text and user_text not in ["HELLO_SERVER", "__SYSTEM_CONNECTION_INITIALIZED__"]:
-                    asyncio.create_task(self.process_text_inference(user_text))
+    duration = time.time() - self.start_time
+    print(f"🔌 [WS DISCONNECT] Connection severed. Code: {close_code}")
 
-            except json.JSONDecodeError:
-                clean_text = text_data.strip()
-                if clean_text and not clean_text.startswith("{"):
-                    asyncio.create_task(self.process_text_inference(clean_text))
-            except Exception as e:
-                print(f"⚠️ [RECEIVE ERROR]: {e}")
+    if self.session_id:
+      asyncio.create_task(
+          self.finalize_call_session(
+              self.session_id, duration, self.call_transcript_log
+          )
+      )
 
-        # ------------------------------------------------------------------
-        # 2. HANDLE BINARY AUDIO CHUNKS (STREAMING PCM)
-        # ------------------------------------------------------------------
-        elif bytes_data:
-            if not self.is_connected:
-                return
-                
-            self.audio_buffer.extend(bytes_data)
-            audio_frame = np.frombuffer(bytes_data, dtype=np.int16)
-            
-            if len(audio_frame) == 0:
-                return
+    self.audio_buffer.clear()
 
-            rms_energy = np.sqrt(np.mean(audio_frame.astype(np.float32)**2))
-            current_time = time.time()
+  async def receive(self, text_data=None, bytes_data=None):
+    self.last_activity_time = time.time()
 
-            # Voice Activity Detection (VAD) Logic
-            if rms_energy > self.ENERGY_THRESHOLD:
-                self.is_user_talking = True
-                self.silence_start_time = None
-            else:
-                if self.is_user_talking and self.silence_start_time is None:
-                    self.silence_start_time = current_time
+    if text_data:
+      try:
+        parsed_json = json.loads(text_data)
 
-            # Calculate silence duration
-            silence_duration = (current_time - self.silence_start_time) if self.silence_start_time else 0.0
+        if "audio" in parsed_json:
+          import base64
 
-            # Dispatch buffer if silence interval met OR hard size cap reached
-            should_dispatch = (
-                (self.is_user_talking and silence_duration >= self.SILENCE_DURATION_SEC) or
-                (len(self.audio_buffer) >= self.MAX_BUFFER_BYTES)
+          bytes_data = base64.b64decode(parsed_json["audio"])
+        else:
+          if (
+              "client_phone_number" in parsed_json
+              or parsed_json.get("event") == "client_phone_number"
+          ):
+            self.client_phone = parsed_json.get("client_phone_number")
+            self.lead_details = parsed_json.get(
+                "lead_details", parsed_json.get("details", "")
             )
+            self.session_id = await self.create_call_session(self.client_phone)
+            print(f"📱 [METADATA BOUND] Session active. ID: {self.client_phone}")
 
-            if should_dispatch and len(self.audio_buffer) > 8000:
-                print(f"🎙️ [SPEECH CHUNK READY] Processing {len(self.audio_buffer)} bytes...")
-                raw_buffer = bytes(self.audio_buffer)
-                self.audio_buffer.clear()
-                self.is_user_talking = False
-                self.silence_start_time = None
-                
-                asyncio.create_task(self.process_audio_transcription(raw_buffer))
+            if not self.greeting_sent:
+              self.greeting_sent = True
+              asyncio.create_task(self.trigger_initial_greeting())
+            return
 
-    async def trigger_initial_greeting(self):
-        """Fetches active opening greeting and speaks it when line opens."""
-        await asyncio.sleep(0.4)
-        script_data = await self.get_active_script()
-        
-        greeting_text = script_data['greeting'] if script_data else "Hello! How can I help you today?"
-        
-        if self.is_connected:
-            print(f"🗣️ [INITIAL GREETING]: {greeting_text}")
-            self.call_transcript_log.append(f"AI Agent: {greeting_text}")
-            
-            await self.safe_send({
-                "type": "ai_response",
-                "sender": "AI",
-                "text": greeting_text
-            })
-            
-            pcm_bytes = await generate_voice_pcm_bytes(greeting_text)
-            if pcm_bytes and self.is_connected:
-                await self.send(bytes_data=pcm_bytes)
+          if parsed_json.get("event") == "call_answered":
+            if not self.greeting_sent:
+              self.greeting_sent = True
+              asyncio.create_task(self.trigger_initial_greeting())
+            return
 
-        
-    async def process_audio_transcription(self, raw_audio_bytes):
-        """Transcribes incoming 16-bit PCM 16kHz mono audio."""
-
-        try:
-            pcm_int16 = np.frombuffer(raw_audio_bytes, dtype=np.int16)
-
-            if len(pcm_int16) == 0:
-                print("⚠️ [WHISPER] Empty PCM buffer")
-                return
-
-            max_amp = int(np.max(np.abs(pcm_int16)))
-            rms = float(np.sqrt(np.mean(pcm_int16.astype(np.float32) ** 2)))
-            duration = len(pcm_int16) / 16000.0
-
+          if parsed_json.get("event") == "call_state_changed":
             print(
-                f"🔊 [WHISPER PCM] "
-                f"bytes={len(raw_audio_bytes)} "
-                f"samples={len(pcm_int16)} "
-                f"duration={duration:.2f}s "
-                f"max_amp={max_amp} "
-                f"rms={rms:.2f}"
+                "📞 [TELEMETRY REGISTRY] Hardware Line Changed:"
+                f" {parsed_json.get('state')}"
             )
+            return
 
-            final_audio = pcm_int16.astype(np.float32) / 32768.0
+          user_text = parsed_json.get(
+              "text",
+              parsed_json.get("message", parsed_json.get("prompt", "")),
+          ).strip()
+          if user_text and user_text not in [
+              "HELLO_SERVER",
+              "__SYSTEM_CONNECTION_INITIALIZED__",
+          ]:
+            asyncio.create_task(self.process_text_inference(user_text))
+          return
 
-            segments, info = await asyncio.to_thread(
-                whisper_model.transcribe,
-                final_audio,
-                beam_size=1,
-                language="en",
-                no_speech_threshold=0.4,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 500}
-            )
+      except json.JSONDecodeError:
+        clean_text = text_data.strip()
+        if clean_text and not clean_text.startswith("{"):
+          asyncio.create_task(self.process_text_inference(clean_text))
+        return
 
-            user_text = "".join(segment.text for segment in segments).strip()
-            clean_check = re.sub(r"[^\w\s]", "", user_text.lower()).strip()
+    if bytes_data:
+      # Capture all raw incoming customer frame data immediately
+      self.customer_pcm.extend(bytes_data)
 
-            hallucinations = [
-                "you",
-                "you you",
-                "thank you",
-                "subtitles",
-                "bye",
-                "amaraorg",
-                "mb",
-                "thank you for watching"
-            ]
+      if not self.is_connected or self.is_ai_speaking:
+        return
 
-            if user_text and len(clean_check) >= 2 and clean_check not in hallucinations:
-                print(f"🗣️ [WHISPER TRANSCRIPT]: {user_text}")
+      self.audio_buffer.extend(bytes_data)
+      audio_frame = np.frombuffer(bytes_data, dtype=np.int16)
 
-                if hasattr(self, "is_connected") and self.is_connected:
-                    asyncio.create_task(self.process_text_inference(user_text))
-            else:
-                print(f"⚠️ [WHISPER IGNORED]: Ignored empty or hallucinated audio: '{user_text}'")
+      if len(audio_frame) == 0:
+        return
 
-        except Exception as e:
-            print(f"❌ [TRANSCRIPTION FAIL]: {e}")
+      rms_energy = np.sqrt(np.mean(audio_frame.astype(np.float32) ** 2))
+      current_time = time.time()
 
-    async def process_text_inference(self, user_text):
-        print(f"🤖 [LLAMA TRIGGERED] Generating response for: '{user_text}'")
-        self.call_transcript_log.append(f"Customer: {user_text}")
-        
+      if rms_energy > self.ENERGY_THRESHOLD:
+        self.is_user_talking = True
+        self.silence_start_time = None
+      else:
+        if self.is_user_talking and self.silence_start_time is None:
+          self.silence_start_time = current_time
+
+      silence_duration = (
+          (current_time - self.silence_start_time)
+          if self.silence_start_time
+          else 0.0
+      )
+
+      should_dispatch = (
+          self.is_user_talking and silence_duration >= self.SILENCE_DURATION_SEC
+      ) or (len(self.audio_buffer) >= self.MAX_BUFFER_BYTES)
+
+      if should_dispatch and len(self.audio_buffer) > 4000:
+        print(
+            "🎙️ [SPEECH CHUNK READY] Processing"
+            f" {len(self.audio_buffer)} bytes..."
+        )
+        raw_buffer = bytes(self.audio_buffer)
+        self.audio_buffer.clear()
+        self.is_user_talking = False
+        self.silence_start_time = None
+
+        asyncio.create_task(self.process_audio_transcription(raw_buffer))
+
+  async def process_audio_transcription(self, raw_audio_bytes):
+    try:
+      if self.is_ai_speaking:
+        print("🎤 [FEEDBACK GUARD] AI is speaking, ignoring input.")
+        return
+
+      pcm_int16 = np.frombuffer(raw_audio_bytes, dtype=np.int16)
+      if len(pcm_int16) == 0:
+        return
+
+      audio_float32 = pcm_int16.astype(np.float32) / 32768.0
+
+      # Dynamic Audio Gain Normalization for quiet microphones
+      max_peak = np.max(np.abs(audio_float32))
+      if max_peak > 0.01:
+        audio_float32 = audio_float32 / max_peak
+
+      segments, _ = await asyncio.to_thread(
+          whisper_model.transcribe,
+          audio_float32,
+          beam_size=1,
+          language="en",
+          condition_on_previous_text=False,
+          vad_filter=True,
+          vad_parameters={"min_silence_duration_ms": 300},
+      )
+
+      user_text = "".join(segment.text for segment in segments).strip()
+      clean_check = re.sub(r"[^\w\s]", "", user_text.lower()).strip()
+
+      hallucinations = [
+          "you",
+          "you you",
+          "thank you",
+          "subtitles",
+          "bye",
+          "amaraorg",
+          "mb",
+          "thank you for watching",
+          "thanks for watching",
+      ]
+
+      if (
+          user_text
+          and len(clean_check) >= 2
+          and clean_check not in hallucinations
+      ):
+        print(f"🗣️ [WHISPER TRANSCRIPT]: {user_text}")
+        if self.is_connected:
+          asyncio.create_task(self.process_text_inference(user_text))
+      else:
+        print(f"⚠️ [WHISPER IGNORED]: Empty or hallucinated: '{user_text}'")
+
+    except Exception as e:
+      print(f"❌ [TRANSCRIPTION FAIL]: {e}")
+
+  async def trigger_initial_greeting(self):
+    await asyncio.sleep(0.4)
+    script_data = await self.get_active_script()
+
+    greeting_text = (
+        script_data["greeting"]
+        if script_data
+        else "Hello! How can I help you today?"
+    )
+
+    if self.is_connected:
+      print(f"🗣️ [INITIAL GREETING]: {greeting_text}")
+      self.call_transcript_log.append(f"AI Agent: {greeting_text}")
+
+      await self.safe_send({
+          "type": "ai_response",
+          "sender": "AI",
+          "text": greeting_text,
+      })
+
+      try:
+        self.is_ai_speaking = True
+        pcm_bytes = await generate_voice_pcm_bytes(greeting_text)
+        if pcm_bytes and self.is_connected:
+          self.ai_pcm.extend(pcm_bytes)
+          await self.send(bytes_data=pcm_bytes)
+          await asyncio.sleep(len(pcm_bytes) / 32000.0)
+      except Exception as e:
+        print(f"⚠️ [GREETING ERROR]: {e}")
+      finally:
+        self.is_ai_speaking = False
+        print("🎙️ [MIC UNLOCKED] Listening for customer voice...")
+
+  async def process_text_inference(self, user_text):
+    print(f"🤖 [LLAMA TRIGGERED] Processing: '{user_text}'")
+    self.call_transcript_log.append(f"Customer: {user_text}")
+
+    await self.safe_send({
+        "type": "user_transcript",
+        "sender": "Customer",
+        "text": user_text,
+    })
+
+    script_data = await self.get_active_script()
+    system_prompt = (
+        f"You are {script_data['bot_name']}, AI Agent for"
+        f" {script_data['company']}. Details: {script_data['details']}. Keep"
+        " answers under 2 short sentences."
+        if script_data
+        else (
+            "You are a helpful AI sales assistant. Keep responses under 2"
+            " sentences."
+        )
+    )
+
+    prompt_context = (
+        f"{system_prompt}\n\nLead Context:"
+        f" {self.lead_details}\nCustomer: {user_text}\nAI:"
+    )
+
+    try:
+      self.is_ai_speaking = True
+      client = ollama.AsyncClient()
+      response_stream = await client.generate(
+          model="llama3.2", prompt=prompt_context, stream=True
+      )
+
+      accumulated_text = ""
+      sentence_buffer = ""
+
+      async for chunk in response_stream:
+        if not self.is_connected:
+          break
+
+        token = chunk.get("response", "")
+        accumulated_text += token
+        sentence_buffer += token
+
+        sentences, sentence_buffer = split_into_sentences(sentence_buffer)
+
+        for sentence in sentences:
+          if sentence.strip():
+            pcm_bytes = await generate_voice_pcm_bytes(sentence)
+            if pcm_bytes and self.is_connected:
+              self.ai_pcm.extend(pcm_bytes)
+              await self.send(bytes_data=pcm_bytes)
+              await asyncio.sleep(len(pcm_bytes) / 32000.0)
+
+      if sentence_buffer.strip() and self.is_connected:
+        pcm_bytes = await generate_voice_pcm_bytes(sentence_buffer)
+        if pcm_bytes and self.is_connected:
+          self.ai_pcm.extend(pcm_bytes)
+          await self.send(bytes_data=pcm_bytes)
+          await asyncio.sleep(len(pcm_bytes) / 32000.0)
+
+      if accumulated_text and self.is_connected:
+        print(f"🗣️ [AI RESPONSE COMPLETE]: {accumulated_text.strip()}")
+        self.call_transcript_log.append(
+            f"AI Agent: {accumulated_text.strip()}"
+        )
         await self.safe_send({
-            "type": "user_transcript",
-            "sender": "Customer",
-            "text": user_text
+            "type": "ai_response",
+            "sender": "AI",
+            "text": accumulated_text.strip(),
         })
 
-        script_data = await self.get_active_script()
-        
-        if script_data:
-            system_prompt = (
-                f"You are {script_data['bot_name']}, an AI Sales Representative for {script_data['company']}.\n"
-                f"KNOWLEDGE BASE:\n{script_data['details']}\n\n"
-                f"RULES:\n"
-                f"1. GREETING: '{script_data['greeting']}'\n"
-                f"2. CLOSING: '{script_data['closing']}'\n"
-                f"3. Keep answers under 2 concise, natural conversational sentences."
-            )
-        else:
-            system_prompt = "You are a helpful AI sales assistant. Keep responses under 2 sentences."
+    except Exception as e:
+      print(f"⚠️ [INFERENCE EXCEPTION]: {e}")
+    finally:
+      self.is_ai_speaking = False
 
-        prompt_context = f"{system_prompt}\n\nLead Context: {self.lead_details}\nCustomer: {user_text}\nAI:"
+  async def safe_send(self, payload: dict):
+    if hasattr(self, "is_connected") and self.is_connected:
+      try:
+        await self.send(text_data=json.dumps(payload))
+      except Exception:
+        self.is_connected = False
 
-        def _run_ollama():
-            try:
-                res = ollama.generate(model="llama3.2", prompt=prompt_context, stream=False)
-                return res.get("response", "").strip()
-            except Exception as e:
-                print(f"❌ [OLLAMA MODEL ERROR]: {e}")
-                try:
-                    res = ollama.generate(model="llama3", prompt=prompt_context, stream=False)
-                    return res.get("response", "").strip()
-                except Exception as fallback_err:
-                    print(f"❌ [OLLAMA FALLBACK ERROR]: {fallback_err}")
-                    return "I understand. How else can I assist you?"
-
-        try:
-            full_ai_response = await asyncio.to_thread(_run_ollama)
-            
-            if full_ai_response and self.is_connected:
-                print(f"🗣️ [AI RESPONSE]: {full_ai_response}")
-                self.call_transcript_log.append(f"AI Agent: {full_ai_response}")
-                
-                # Send text response to Flutter Call UI
-                await self.safe_send({
-                    "type": "ai_response",
-                    "sender": "AI",
-                    "text": full_ai_response
-                })
-
-                # Convert AI response to PCM bytes and stream over cellular line
-                pcm_bytes = await generate_voice_pcm_bytes(full_ai_response)
-                if pcm_bytes and self.is_connected:
-                    await self.send(bytes_data=pcm_bytes)
-
-        except Exception as e:
-            print(f"⚠️ [INFERENCE EXCEPTION]: {e}")
-
-    async def safe_send(self, payload: dict):
-        if hasattr(self, 'is_connected') and self.is_connected:
-            try:
-                await self.send(text_data=json.dumps(payload))
-            except Exception as e:
-                print(f"⚠️ [SEND SKIPPED]: Socket closed ({e})")
-                self.is_connected = False
-
-    @database_sync_to_async
-    def create_call_session(self, phone_number):
-        try:
-            if not phone_number:
-                return None
-            contact, _ = Contact.objects.get_or_create(phone_number=phone_number)
-            session = CallSession.objects.create(contact=contact, status="active")
-            return session.id
-        except Exception as e:
-            print(f"⚠️ [DB CREATE SESSION ERROR]: {e}")
-            return None
-
-    @database_sync_to_async
-    def finalize_call_session(self, session_id, duration, transcript_log):
-        try:
-            if not session_id:
-                return
-            session = CallSession.objects.get(id=session_id)
-            session.duration_seconds = int(duration)
-            session.status = "completed"
-            session.save()
-            print(f"✅ [DB SESSION SAVED] ID: {session_id} | Duration: {int(duration)}s")
-        except Exception as e:
-            print(f"⚠️ [DB FINALIZE ERROR]: {e}")
-
-    @database_sync_to_async
-    def get_active_script(self):
-        """Fetches active script parameters from Django DB."""
-        try:
-            script = CompanyScript.objects.filter(is_active=True).first()
-            if script:
-                return {
-                    "bot_name": script.bot_name,
-                    "company": script.company_name,
-                    "details": script.company_details,
-                    "greeting": script.opening_greeting,
-                    "closing": script.closing_statement
-                }
-        except Exception as e:
-            print(f"⚠️ [DB SCRIPT FETCH ERROR]: {e}")
+  @database_sync_to_async
+  def create_call_session(self, phone_number):
+    try:
+      if not phone_number:
         return None
+      contact, _ = Contact.objects.get_or_create(phone_number=phone_number)
+      session = CallSession.objects.create(contact=contact, status="active")
+      return session.id
+    except Exception as e:
+      print(f"⚠️ [DB CREATE SESSION ERROR]: {e}")
+      return None
+
+  @database_sync_to_async
+  def finalize_call_session(self, session_id, duration, transcript_log):
+    try:
+      if not session_id:
+        return
+      session = CallSession.objects.get(id=session_id)
+      session.duration_seconds = int(duration)
+      session.status = "completed"
+
+      timestamp = int(time.time())
+
+      # Save Customer Audio stream safely
+      if len(self.customer_pcm) > 0:
+        raw_cust = bytes(self.customer_pcm)
+        if len(raw_cust) % 2 != 0:
+          raw_cust = raw_cust[:-1]
+
+        cust_io = io.BytesIO()
+        with wave.open(cust_io, "wb") as wav_file:
+          wav_file.setnchannels(1)
+          wav_file.setsampwidth(2)
+          wav_file.setframerate(16000)
+          wav_file.writeframes(raw_cust)
+
+        cust_filename = f"customer_{session_id}_{timestamp}.wav"
+        session.recording_file.save(
+            cust_filename, ContentFile(cust_io.getvalue()), save=False
+        )
+
+      # Save AI Audio stream safely
+      if len(self.ai_pcm) > 0:
+        raw_ai = bytes(self.ai_pcm)
+        if len(raw_ai) % 2 != 0:
+          raw_ai = raw_ai[:-1]
+
+        ai_io = io.BytesIO()
+        with wave.open(ai_io, "wb") as wav_file:
+          wav_file.setnchannels(1)
+          wav_file.setsampwidth(2)
+          wav_file.setframerate(16000)
+          wav_file.writeframes(raw_ai)
+
+        ai_filename = f"ai_{session_id}_{timestamp}.wav"
+        session.ai_recording_file.save(
+            ai_filename, ContentFile(ai_io.getvalue()), save=False
+        )
+
+      session.save()
+      print(f"✅ [DB SESSION SAVED] Dual recordings saved for ID: {session_id}")
+    except Exception as e:
+      print(f"⚠️ [DB FINALIZE ERROR]: {e}")
+
+  @database_sync_to_async
+  def get_active_script(self):
+    try:
+      script = CompanyScript.objects.filter(is_active=True).first()
+      if script:
+        return {
+            "bot_name": script.bot_name,
+            "company": script.company_name,
+            "details": script.company_details,
+            "greeting": script.opening_greeting,
+            "closing": script.closing_statement,
+        }
+    except Exception as e:
+      print(f"⚠️ [DB SCRIPT FETCH ERROR]: {e}")
+    return None
