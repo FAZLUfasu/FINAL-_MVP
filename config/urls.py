@@ -4,10 +4,13 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path
 from calls import views
-
+from calls.views import home
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/call-queue/', views.call_queue_list, name='call_queue_list'),
+    path("", home, name="home"),
+    
+
     path(
         'api/call-queue/<int:pk>/update/',
         views.update_call_status,

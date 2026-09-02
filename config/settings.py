@@ -27,7 +27,7 @@ SECRET_KEY = (
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '10.55.151.248', '*']
+ALLOWED_HOSTS = ['127.0.0.1','localhost','10.130.124.248','192.168.1.21','*']
 
 
 # Application definition
@@ -35,6 +35,7 @@ ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '10.55.151.248', '*']
 INSTALLED_APPS = [
     'daphne',
     'channels',
+    "unfold",
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -43,17 +44,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'calls',
-    'authentication',
-    'agents',
-    'campaigns',
-    'contacts',
-    'ai_engine',
-    'speech',
-    'knowledge_base',
-    'analytics',
-    'dashboard',
-    'notifications',
-    'settings_app',
+    
 ]
 
 MIDDLEWARE = [
@@ -71,7 +62,7 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [

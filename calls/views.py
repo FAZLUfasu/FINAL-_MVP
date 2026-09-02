@@ -169,3 +169,7 @@ def export_reports_csv(request):
         ])
 
     return response
+from django.shortcuts import render
+
+def home(request):
+    return render(request, "index.html")

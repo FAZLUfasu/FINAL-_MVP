@@ -414,8 +414,11 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
       except Exception as e:
         print(f"⚠️ [GREETING ERROR]: {e}")
       finally:
-        self.is_ai_speaking = False
-        print("🎙️ [MIC UNLOCKED] Listening for customer voice...")
+          self.is_ai_speaking = False
+          print(
+              "🎧 [CUSTOMER DOWNLINK READY] "
+              "Waiting for remote customer audio..."
+          )
 
   async def process_text_inference(self, user_text):
     print(f"🤖 [LLAMA TRIGGERED] Processing: '{user_text}'")

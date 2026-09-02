@@ -1,0 +1,1690 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Telecall AI | Intelligent AI Telecalling System</title>
+
+    <meta name="description"
+          content="Telecall AI is an intelligent AI-powered telecalling and automated customer communication system built with Python and Django.">
+
+    <meta name="keywords"
+          content="Telecall AI, AI Telecaller, Django, Python, Auto Dialer, AI Calling, Voice AI">
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f5f7fb;
+            color: #172033;
+            line-height: 1.6;
+        }
+
+        a {
+            text-decoration: none;
+            color: inherit;
+        }
+
+        /* =========================
+           NAVBAR
+        ========================= */
+
+        header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            z-index: 1000;
+            background: rgba(255,255,255,0.96);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid #e8ebf2;
+        }
+
+        .navbar {
+            max-width: 1200px;
+            margin: auto;
+            height: 75px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 25px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 23px;
+            font-weight: 800;
+            color: #2563eb;
+        }
+
+        .logo-icon {
+            width: 42px;
+            height: 42px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #2563eb, #7c3aed);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 21px;
+        }
+
+        nav {
+            display: flex;
+            gap: 28px;
+            align-items: center;
+        }
+
+        nav a {
+            font-size: 14px;
+            font-weight: 600;
+            color: #475569;
+            transition: 0.3s;
+        }
+
+        nav a:hover {
+            color: #2563eb;
+        }
+
+        .admin-btn {
+            background: #2563eb;
+            color: white !important;
+            padding: 11px 18px;
+            border-radius: 9px;
+        }
+
+        .admin-btn:hover {
+            background: #1d4ed8;
+        }
+
+        /* =========================
+           HERO
+        ========================= */
+
+        .hero {
+            min-height: 100vh;
+            padding: 150px 25px 90px;
+            background:
+                radial-gradient(circle at 10% 20%, rgba(37,99,235,0.12), transparent 30%),
+                radial-gradient(circle at 90% 10%, rgba(124,58,237,0.12), transparent 30%),
+                #f8fafc;
+        }
+
+        .hero-container {
+            max-width: 1200px;
+            margin: auto;
+            display: grid;
+            grid-template-columns: 1.05fr 0.95fr;
+            gap: 70px;
+            align-items: center;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 8px 14px;
+            border-radius: 30px;
+            background: #e8f0ff;
+            color: #2563eb;
+            font-size: 13px;
+            font-weight: 700;
+            margin-bottom: 20px;
+        }
+
+        .hero h1 {
+            font-size: clamp(42px, 6vw, 72px);
+            line-height: 1.05;
+            margin-bottom: 24px;
+            letter-spacing: -2px;
+        }
+
+        .gradient-text {
+            background: linear-gradient(90deg, #2563eb, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 18px;
+            color: #64748b;
+            max-width: 650px;
+            margin-bottom: 32px;
+        }
+
+        .hero-buttons {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 14px 23px;
+            border-radius: 10px;
+            font-weight: 700;
+            font-size: 14px;
+            transition: 0.3s;
+        }
+
+        .btn-primary {
+            background: #2563eb;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            background: #1d4ed8;
+        }
+
+        .btn-secondary {
+            background: white;
+            color: #334155;
+            border: 1px solid #dce2eb;
+        }
+
+        .btn-secondary:hover {
+            border-color: #2563eb;
+            color: #2563eb;
+        }
+
+        /* =========================
+           DASHBOARD MOCKUP
+        ========================= */
+
+        .dashboard {
+            background: #111827;
+            border-radius: 20px;
+            padding: 12px;
+            box-shadow: 0 30px 70px rgba(15,23,42,0.25);
+            transform: rotate(1deg);
+        }
+
+        .dashboard-top {
+            height: 35px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding-left: 10px;
+        }
+
+        .dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: #64748b;
+        }
+
+        .screen {
+            background: #f8fafc;
+            border-radius: 13px;
+            padding: 20px;
+            min-height: 410px;
+        }
+
+        .screen-title {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 18px;
+        }
+
+        .screen-title h3 {
+            font-size: 18px;
+        }
+
+        .online {
+            font-size: 12px;
+            background: #dcfce7;
+            color: #15803d;
+            padding: 6px 10px;
+            border-radius: 20px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3,1fr);
+            gap: 10px;
+            margin-bottom: 18px;
+        }
+
+        .stat {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #e5e7eb;
+        }
+
+        .stat small {
+            color: #64748b;
+        }
+
+        .stat strong {
+            display: block;
+            font-size: 23px;
+            margin-top: 5px;
+        }
+
+        .call-list {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .call {
+            display: flex;
+            justify-content: space-between;
+            padding: 13px 15px;
+            border-bottom: 1px solid #edf0f4;
+            font-size: 13px;
+        }
+
+        .call:last-child {
+            border-bottom: none;
+        }
+
+        .status {
+            color: #16a34a;
+            font-weight: bold;
+        }
+
+        /* =========================
+           SECTIONS
+        ========================= */
+
+        section {
+            padding: 100px 25px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: auto;
+        }
+
+        .section-heading {
+            text-align: center;
+            max-width: 750px;
+            margin: 0 auto 55px;
+        }
+
+        .section-heading span {
+            color: #2563eb;
+            font-weight: 800;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .section-heading h2 {
+            font-size: 42px;
+            margin: 12px 0;
+        }
+
+        .section-heading p {
+            color: #64748b;
+            font-size: 17px;
+        }
+
+        /* =========================
+           ABOUT
+        ========================= */
+
+        .about-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 60px;
+            align-items: center;
+        }
+
+        .about-content h2 {
+            font-size: 40px;
+            margin-bottom: 20px;
+        }
+
+        .about-content p {
+            color: #64748b;
+            margin-bottom: 18px;
+        }
+
+        .about-box {
+            background: white;
+            padding: 35px;
+            border-radius: 18px;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 15px 40px rgba(15,23,42,0.07);
+        }
+
+        .about-box h3 {
+            margin-bottom: 15px;
+            font-size: 23px;
+        }
+
+        .about-box ul {
+            list-style: none;
+        }
+
+        .about-box li {
+            padding: 12px 0;
+            border-bottom: 1px solid #eef0f4;
+        }
+
+        .about-box li:last-child {
+            border-bottom: none;
+        }
+
+        /* =========================
+           FEATURES
+        ========================= */
+
+        .features {
+            background: white;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(3,1fr);
+            gap: 22px;
+        }
+
+        .feature-card {
+            background: #f8fafc;
+            border: 1px solid #e7eaf0;
+            padding: 28px;
+            border-radius: 16px;
+            transition: 0.3s;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 20px 40px rgba(15,23,42,0.09);
+        }
+
+        .feature-icon {
+            width: 50px;
+            height: 50px;
+            border-radius: 13px;
+            background: #e8f0ff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 23px;
+            margin-bottom: 18px;
+        }
+
+        .feature-card h3 {
+            margin-bottom: 10px;
+        }
+
+        .feature-card p {
+            color: #64748b;
+            font-size: 14px;
+        }
+
+        /* =========================
+           HOW IT WORKS
+        ========================= */
+
+        .workflow {
+            display: grid;
+            grid-template-columns: repeat(5,1fr);
+            gap: 15px;
+        }
+
+        .workflow-step {
+            text-align: center;
+            position: relative;
+        }
+
+        .step-number {
+            width: 55px;
+            height: 55px;
+            margin: auto auto 15px;
+            border-radius: 50%;
+            background: #2563eb;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+        }
+
+        .workflow-step h3 {
+            font-size: 16px;
+            margin-bottom: 8px;
+        }
+
+        .workflow-step p {
+            color: #64748b;
+            font-size: 13px;
+        }
+
+        /* =========================
+           SCREENSHOTS
+        ========================= */
+
+        .screenshots {
+            background: #f1f5f9;
+        }
+
+        .screenshot-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 25px;
+        }
+
+        .screenshot-card {
+            background: white;
+            padding: 12px;
+            border-radius: 17px;
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 15px 35px rgba(15,23,42,0.07);
+        }
+
+        .screenshot-card img {
+            width: 100%;
+            display: block;
+            border-radius: 10px;
+        }
+
+        .screenshot-caption {
+            padding: 15px 10px 8px;
+        }
+
+        .screenshot-caption h3 {
+            margin-bottom: 5px;
+        }
+
+        .screenshot-caption p {
+            color: #64748b;
+            font-size: 14px;
+        }
+
+        /* =========================
+           TECHNOLOGY
+        ========================= */
+
+        .tech-grid {
+            display: grid;
+            grid-template-columns: repeat(4,1fr);
+            gap: 20px;
+        }
+
+        .tech {
+            background: white;
+            border: 1px solid #e5e7eb;
+            padding: 25px;
+            text-align: center;
+            border-radius: 15px;
+        }
+
+        .tech strong {
+            display: block;
+            font-size: 18px;
+            margin-bottom: 5px;
+        }
+
+        .tech span {
+            color: #64748b;
+            font-size: 13px;
+        }
+
+        /* =========================
+           CONTACT
+        ========================= */
+
+        .contact {
+            background: #111827;
+            color: white;
+        }
+
+        .contact-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 60px;
+        }
+
+        .contact h2 {
+            font-size: 40px;
+            margin-bottom: 20px;
+        }
+
+        .contact p {
+            color: #cbd5e1;
+            margin-bottom: 25px;
+        }
+
+        .contact-details div {
+            margin: 15px 0;
+            color: #e2e8f0;
+        }
+
+        .contact-form {
+            background: white;
+            padding: 30px;
+            border-radius: 17px;
+        }
+
+        .contact-form input,
+        .contact-form textarea {
+            width: 100%;
+            border: 1px solid #dbe1e8;
+            padding: 13px;
+            border-radius: 8px;
+            margin-bottom: 14px;
+            font-family: inherit;
+            outline: none;
+        }
+
+        .contact-form textarea {
+            min-height: 130px;
+            resize: vertical;
+        }
+
+        .contact-form button {
+            width: 100%;
+            border: none;
+            cursor: pointer;
+        }
+
+        /* =========================
+           SOCIAL
+        ========================= */
+
+        .social {
+            text-align: center;
+            padding: 45px 20px;
+            background: #0f172a;
+            color: white;
+        }
+
+        .social h3 {
+            margin-bottom: 18px;
+        }
+
+        .social-links {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .social-links a {
+            padding: 10px 17px;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            color: #cbd5e1;
+            font-size: 13px;
+            transition: 0.3s;
+        }
+
+        .social-links a:hover {
+            background: #2563eb;
+            border-color: #2563eb;
+            color: white;
+        }
+
+        /* =========================
+           FOOTER
+        ========================= */
+
+        footer {
+            background: #020617;
+            color: #94a3b8;
+            text-align: center;
+            padding: 25px;
+            font-size: 13px;
+        }
+
+        /* =========================
+           RESPONSIVE
+        ========================= */
+
+        @media(max-width: 900px) {
+
+            nav {
+                display: none;
+            }
+
+            .hero-container,
+            .about-grid,
+            .contact-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .feature-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .workflow {
+                grid-template-columns: 1fr 1fr;
+                gap: 35px;
+            }
+
+            .tech-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .dashboard {
+                transform: none;
+            }
+        }
+
+        @media(max-width: 600px) {
+
+            section {
+                padding: 75px 18px;
+            }
+
+            .hero {
+                padding-left: 18px;
+                padding-right: 18px;
+            }
+
+            .feature-grid,
+            .screenshot-grid,
+            .tech-grid,
+            .workflow {
+                grid-template-columns: 1fr;
+            }
+
+            .hero h1 {
+                font-size: 43px;
+            }
+
+            .section-heading h2,
+            .about-content h2,
+            .contact h2 {
+                font-size: 32px;
+            }
+
+            .stats {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<!-- =====================================================
+     NAVIGATION
+===================================================== -->
+
+<header>
+    <div class="navbar">
+
+        <a href="#home" class="logo">
+            <span class="logo-icon">☎</span>
+            Telecall AI
+        </a>
+
+        <nav>
+            <a href="#home">Home</a>
+            <a href="#about">About Us</a>
+            <a href="#features">Functions</a>
+            <a href="#screenshots">Screenshots</a>
+            <a href="#contact">Contact Us</a>
+
+            <!-- Django Admin -->
+            <a href="/admin/login/" class="admin-btn">
+                Admin Login
+            </a>
+        </nav>
+
+    </div>
+</header>
+
+
+<!-- =====================================================
+     HOME
+===================================================== -->
+
+<section class="hero" id="home">
+
+    <div class="hero-container">
+
+        <div>
+
+            <span class="badge">
+                🤖 AI POWERED TELECALLING PLATFORM
+            </span>
+
+            <h1>
+                Intelligent
+                <span class="gradient-text">
+                    Telecalling
+                </span>
+                for Modern Business
+            </h1>
+
+            <p>
+                Telecall AI combines automated calling, speech recognition,
+                artificial intelligence and voice synthesis to create
+                intelligent customer conversations at scale.
+            </p>
+
+            <div class="hero-buttons">
+
+                <a href="#features" class="btn btn-primary">
+                    Explore System
+                </a>
+
+                <a href="#contact" class="btn btn-secondary">
+                    Contact Us
+                </a>
+
+            </div>
+
+        </div>
+
+
+        <!-- Dashboard Preview -->
+
+        <div class="dashboard">
+
+            <div class="dashboard-top">
+                <span class="dot"></span>
+                <span class="dot"></span>
+                <span class="dot"></span>
+            </div>
+
+            <div class="screen">
+
+                <div class="screen-title">
+                    <h3>Telecall Dashboard</h3>
+                    <span class="online">
+                        ● System Online
+                    </span>
+                </div>
+
+                <div class="stats">
+
+                    <div class="stat">
+                        <small>Total Calls</small>
+                        <strong>1,248</strong>
+                    </div>
+
+                    <div class="stat">
+                        <small>Answered</small>
+                        <strong>942</strong>
+                    </div>
+
+                    <div class="stat">
+                        <small>AI Calls</small>
+                        <strong>816</strong>
+                    </div>
+
+                </div>
+
+                <div class="call-list">
+
+                    <div class="call">
+                        <span>Customer Call #001</span>
+                        <span class="status">Completed</span>
+                    </div>
+
+                    <div class="call">
+                        <span>Customer Call #002</span>
+                        <span class="status">AI Active</span>
+                    </div>
+
+                    <div class="call">
+                        <span>Customer Call #003</span>
+                        <span class="status">Completed</span>
+                    </div>
+
+                    <div class="call">
+                        <span>Customer Call #004</span>
+                        <span class="status">Follow Up</span>
+                    </div>
+
+                    <div class="call">
+                        <span>Customer Call #005</span>
+                        <span class="status">Completed</span>
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</section>
+
+
+<!-- =====================================================
+     ABOUT US
+===================================================== -->
+
+<section id="about">
+
+    <div class="container">
+
+        <div class="section-heading">
+
+            <span>About Us</span>
+
+            <h2>
+                What is Telecall AI?
+            </h2>
+
+            <p>
+                A complete AI-powered telecalling platform designed
+                to automate customer conversations and help businesses
+                manage large-scale calling operations.
+            </p>
+
+        </div>
+
+
+        <div class="about-grid">
+
+            <div class="about-content">
+
+                <h2>
+                    Turning phone calls into intelligent conversations.
+                </h2>
+
+                <p>
+                    Traditional telecalling requires large teams of
+                    operators to repeatedly call customers, understand
+                    their responses and record the results.
+                </p>
+
+                <p>
+                    Telecall AI automates this workflow using Python,
+                    Django, speech recognition, AI language models and
+                    text-to-speech technology.
+                </p>
+
+                <p>
+                    The system can automatically call customers,
+                    listen to the customer voice, understand the
+                    conversation and respond using an AI-generated voice.
+                </p>
+
+            </div>
+
+
+            <div class="about-box">
+
+                <h3>Built for Business</h3>
+
+                <ul>
+
+                    <li>
+                        📞 Automated outbound calling
+                    </li>
+
+                    <li>
+                        🤖 AI-powered customer conversations
+                    </li>
+
+                    <li>
+                        🎙️ Customer speech recognition
+                    </li>
+
+                    <li>
+                        🔊 AI voice responses
+                    </li>
+
+                    <li>
+                        📊 Call analytics and reporting
+                    </li>
+
+                    <li>
+                        📝 Call history and recordings
+                    </li>
+
+                    <li>
+                        👥 Customer and lead management
+                    </li>
+
+                </ul>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</section>
+
+
+<!-- =====================================================
+     FEATURES
+===================================================== -->
+
+<section class="features" id="features">
+
+    <div class="container">
+
+        <div class="section-heading">
+
+            <span>Functions</span>
+
+            <h2>
+                Powerful Telecall Features
+            </h2>
+
+            <p>
+                Everything required to operate an intelligent
+                automated calling system.
+            </p>
+
+        </div>
+
+
+        <div class="feature-grid">
+
+            <div class="feature-card">
+
+                <div class="feature-icon">📞</div>
+
+                <h3>Auto Dialer</h3>
+
+                <p>
+                    Automatically process customer numbers from
+                    the call queue and initiate calls without
+                    manual dialing.
+                </p>
+
+            </div>
+
+
+            <div class="feature-card">
+
+                <div class="feature-icon">🤖</div>
+
+                <h3>AI Conversation</h3>
+
+                <p>
+                    AI understands customer responses and generates
+                    contextual replies during the conversation.
+                </p>
+
+            </div>
+
+
+            <div class="feature-card">
+
+                <div class="feature-icon">🎙️</div>
+
+                <h3>Speech Recognition</h3>
+
+                <p>
+                    Customer voice can be processed through
+                    speech recognition technology to convert
+                    speech into text.
+                </p>
+
+            </div>
+
+
+            <div class="feature-card">
+
+                <div class="feature-icon">🔊</div>
+
+                <h3>AI Voice</h3>
+
+                <p>
+                    AI-generated responses can be converted
+                    into natural speech using text-to-speech.
+                </p>
+
+            </div>
+
+
+            <div class="feature-card">
+
+                <div class="feature-icon">📊</div>
+
+                <h3>Reports</h3>
+
+                <p>
+                    Monitor completed calls, pending calls,
+                    follow-ups and other telecalling statistics.
+                </p>
+
+            </div>
+
+
+            <div class="feature-card">
+
+                <div class="feature-icon">📝</div>
+
+                <h3>Call Records</h3>
+
+                <p>
+                    Maintain call history, transcripts,
+                    recordings and customer interaction data.
+                </p>
+
+            </div>
+
+
+            <div class="feature-card">
+
+                <div class="feature-icon">👥</div>
+
+                <h3>Lead Management</h3>
+
+                <p>
+                    Organize customer numbers into calling
+                    queues and manage lead statuses.
+                </p>
+
+            </div>
+
+
+            <div class="feature-card">
+
+                <div class="feature-icon">🔄</div>
+
+                <h3>Follow Up</h3>
+
+                <p>
+                    Identify customers requiring follow-up
+                    conversations and manage them from the dashboard.
+                </p>
+
+            </div>
+
+
+            <div class="feature-card">
+
+                <div class="feature-icon">🔐</div>
+
+                <h3>Admin Control</h3>
+
+                <p>
+                    Django administration provides secure management
+                    of customers, calls, users and system data.
+                </p>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</section>
+
+
+<!-- =====================================================
+     HOW IT WORKS
+===================================================== -->
+
+<section>
+
+    <div class="container">
+
+        <div class="section-heading">
+
+            <span>Technology Flow</span>
+
+            <h2>
+                How Telecall AI Works
+            </h2>
+
+            <p>
+                The system connects telephony, speech recognition,
+                AI and voice synthesis into one workflow.
+            </p>
+
+        </div>
+
+
+        <div class="workflow">
+
+            <div class="workflow-step">
+
+                <div class="step-number">1</div>
+
+                <h3>Auto Dial</h3>
+
+                <p>
+                    System selects a customer from the call queue
+                    and initiates the phone call.
+                </p>
+
+            </div>
+
+
+            <div class="workflow-step">
+
+                <div class="step-number">2</div>
+
+                <h3>Customer Voice</h3>
+
+                <p>
+                    Customer-side call audio is captured for
+                    speech processing.
+                </p>
+
+            </div>
+
+
+            <div class="workflow-step">
+
+                <div class="step-number">3</div>
+
+                <h3>Whisper</h3>
+
+                <p>
+                    Speech recognition converts the customer's
+                    voice into text.
+                </p>
+
+            </div>
+
+
+            <div class="workflow-step">
+
+                <div class="step-number">4</div>
+
+                <h3>AI Brain</h3>
+
+                <p>
+                    The AI processes the customer message and
+                    generates an appropriate response.
+                </p>
+
+            </div>
+
+
+            <div class="workflow-step">
+
+                <div class="step-number">5</div>
+
+                <h3>AI Voice</h3>
+
+                <p>
+                    The generated response is converted into
+                    speech and returned to the call.
+                </p>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</section>
+
+
+<!-- =====================================================
+     SCREENSHOTS
+===================================================== -->
+
+<section class="screenshots" id="screenshots">
+
+    <div class="container">
+
+        <div class="section-heading">
+
+            <span>System Preview</span>
+
+            <h2>
+                Telecall System Screenshots
+            </h2>
+
+            <p>
+                Preview of the Telecall AI dashboard and
+                automated calling environment.
+            </p>
+
+        </div>
+
+
+        <div class="screenshot-grid">
+
+            <div class="screenshot-card">
+
+                <!--
+                    Replace this image with your real screenshot.
+
+                    Django:
+                    {% static 'images/telecall-dashboard.png' %}
+                -->
+
+                <img
+                    src="{% static 'images/telecall-system-preview.png' %}"
+                    alt="Telecall AI Dashboard">
+
+                <div class="screenshot-caption">
+
+                    <h3>
+                        Telecall Dashboard
+                    </h3>
+
+                    <p>
+                        Monitor calling activity, customer queues,
+                        AI calls and call results.
+                    </p>
+
+                </div>
+
+            </div>
+
+
+            <div class="screenshot-card">
+
+                <div style="
+                    min-height:300px;
+                    border-radius:10px;
+                    background:linear-gradient(135deg,#eef4ff,#f5f3ff);
+                    display:flex;
+                    align-items:center;
+                    justify-content:center;
+                    text-align:center;
+                    padding:40px;
+                ">
+
+                    <div>
+
+                        <div style="font-size:55px;">
+                            🎙️
+                        </div>
+
+                        <h3 style="margin:15px 0;">
+                            AI Voice Conversation
+                        </h3>
+
+                        <p style="color:#64748b;">
+                            Customer speech → Whisper →
+                            AI → TTS → Voice response
+                        </p>
+
+                    </div>
+
+                </div>
+
+                <div class="screenshot-caption">
+
+                    <h3>
+                        AI Calling Pipeline
+                    </h3>
+
+                    <p>
+                        Intelligent speech processing and AI
+                        response generation.
+                    </p>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</section>
+
+
+<!-- =====================================================
+     TECHNOLOGY
+===================================================== -->
+
+<section>
+
+    <div class="container">
+
+        <div class="section-heading">
+
+            <span>Technology</span>
+
+            <h2>
+                Built With Modern Technology
+            </h2>
+
+            <p>
+                The Telecall platform is designed around a
+                Python and Django backend architecture.
+            </p>
+
+        </div>
+
+
+        <div class="tech-grid">
+
+            <div class="tech">
+
+                <strong>Python</strong>
+
+                <span>
+                    Backend Programming
+                </span>
+
+            </div>
+
+
+            <div class="tech">
+
+                <strong>Django</strong>
+
+                <span>
+                    Web & API Framework
+                </span>
+
+            </div>
+
+
+            <div class="tech">
+
+                <strong>WebSocket</strong>
+
+                <span>
+                    Real-time Communication
+                </span>
+
+            </div>
+
+
+            <div class="tech">
+
+                <strong>Whisper</strong>
+
+                <span>
+                    Speech Recognition
+                </span>
+
+            </div>
+
+
+            <div class="tech">
+
+                <strong>AI / LLM</strong>
+
+                <span>
+                    Conversation Engine
+                </span>
+
+            </div>
+
+
+            <div class="tech">
+
+                <strong>TTS</strong>
+
+                <span>
+                    Voice Generation
+                </span>
+
+            </div>
+
+
+            <div class="tech">
+
+                <strong>Flutter</strong>
+
+                <span>
+                    Mobile Application
+                </span>
+
+            </div>
+
+
+            <div class="tech">
+
+                <strong>Android</strong>
+
+                <span>
+                    Telephony Integration
+                </span>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</section>
+
+
+<!-- =====================================================
+     ADMIN
+===================================================== -->
+
+<section>
+
+    <div class="container">
+
+        <div class="section-heading">
+
+            <span>Administration</span>
+
+            <h2>
+                Manage Telecall From Django Admin
+            </h2>
+
+            <p>
+                Administrators can manage system data,
+                users, customers, call queues and reports.
+            </p>
+
+        </div>
+
+
+        <div class="about-box" style="max-width:800px;margin:auto;">
+
+            <ul>
+
+                <li>
+                    👤 Manage admin users
+                </li>
+
+                <li>
+                    👥 Manage customers and leads
+                </li>
+
+                <li>
+                    📞 Manage call queues
+                </li>
+
+                <li>
+                    📊 View calling reports
+                </li>
+
+                <li>
+                    📝 Review call records
+                </li>
+
+                <li>
+                    🔐 Secure Django authentication
+                </li>
+
+            </ul>
+
+            <div style="margin-top:25px;text-align:center;">
+
+                <a
+                    href="/admin/login/"
+                    class="btn btn-primary">
+                    Open Admin Login
+                </a>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</section>
+
+
+<!-- =====================================================
+     CONTACT
+===================================================== -->
+
+<section class="contact" id="contact">
+
+    <div class="container">
+
+        <div class="contact-grid">
+
+            <div>
+
+                <h2>
+                    Let's Build Smarter Customer Communication.
+                </h2>
+
+                <p>
+                    Interested in Telecall AI or want to integrate
+                    intelligent calling into your organization?
+                    Contact our team.
+                </p>
+
+                <div class="contact-details">
+
+                    <div>
+                        📧 Email:
+                        your-email@example.com
+                    </div>
+
+                    <div>
+                        📞 Phone:
+                        +91 XXXXXXXXXX
+                    </div>
+
+                    <div>
+                        📍 Location:
+                        India
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <form
+                class="contact-form"
+                method="POST"
+                action="#">
+
+                {% csrf_token %}
+
+                <input
+                    type="text"
+                    name="name"
+                    placeholder="Your Name"
+                    required>
+
+                <input
+                    type="email"
+                    name="email"
+                    placeholder="Your Email"
+                    required>
+
+                <input
+                    type="tel"
+                    name="phone"
+                    placeholder="Phone Number">
+
+                <textarea
+                    name="message"
+                    placeholder="Your Message"
+                    required></textarea>
+
+                <button
+                    type="submit"
+                    class="btn btn-primary">
+
+                    Send Message
+
+                </button>
+
+            </form>
+
+        </div>
+
+    </div>
+
+</section>
+
+
+<!-- =====================================================
+     SOCIAL MEDIA
+===================================================== -->
+
+<div class="social">
+
+    <h3>
+        Follow Telecall AI
+    </h3>
+
+    <div class="social-links">
+
+        <!-- Replace # with your actual social links -->
+
+        <a href="#" target="_blank">
+            LinkedIn
+        </a>
+
+        <a href="#" target="_blank">
+            Instagram
+        </a>
+
+        <a href="#" target="_blank">
+            Facebook
+        </a>
+
+        <a href="#" target="_blank">
+            YouTube
+        </a>
+
+        <a href="#" target="_blank">
+            X / Twitter
+        </a>
+
+    </div>
+
+</div>
+
+
+<!-- =====================================================
+     FOOTER
+===================================================== -->
+
+<footer>
+
+    © 2026 Telecall AI.
+    All Rights Reserved.
+
+</footer>
+
+
+<!-- =====================================================
+     SMALL JAVASCRIPT
+===================================================== -->
+
+<script>
+
+    // Close mobile navigation / future mobile menu logic
+    // can be added here.
+
+    // Simple page-load animation
+    document.addEventListener("DOMContentLoaded", function () {
+
+        console.log(
+            "Telecall AI website loaded successfully."
+        );
+
+    });
+
+</script>
+
+</body>
+</html>
