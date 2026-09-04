@@ -1,3 +1,4 @@
+
 import asyncio
 import gc
 import io
@@ -164,6 +165,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
       self.is_connected = True
       self.greeting_sent = False
       self.is_ai_speaking = False
+      self.is_tts_generating = False
 
       self.client_phone = None
       self.session_id = None
@@ -179,9 +181,12 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
       self.is_user_talking = False
 
       # Customer VAD / endpointing
-      self.ENERGY_THRESHOLD = 15
-      self.SILENCE_DURATION_SEC = 0.7
-      self.MAX_BUFFER_BYTES = 96000
+      # 16 kHz PCM16 mono endpointing.
+      self.ENERGY_THRESHOLD = 300
+      self.SILENCE_DURATION_SEC = 0.5
+      self.MAX_BUFFER_BYTES = 64000
+      self.PRE_ROLL_MAX_BYTES = 8192
+      self.pre_roll_buffer = bytearray()
 
       # Inactivity watchdog
       self.INACTIVITY_TIMEOUT_SECONDS = 120.0
@@ -319,6 +324,8 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     # 6. CLEAR STT BUFFER
     # --------------------------------------------------
     self.audio_buffer.clear()
+    if hasattr(self, "pre_roll_buffer"):
+        self.pre_roll_buffer.clear()
 
     print(
         "✅ [WS CLEANUP COMPLETE]"
@@ -464,71 +471,69 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
     if not isinstance(bytes_data, (bytes, bytearray, memoryview)):
       print(
-          f"❌ [PCM TYPE ERROR] "
-          f"Unsupported type: {type(bytes_data).__name__}"
+          f"❌ [PCM TYPE ERROR] Unsupported type: "
+          f"{type(bytes_data).__name__}"
       )
       return
 
     frame = bytes(bytes_data)
-
     if not frame:
       return
 
     if len(frame) % 2 != 0:
-      print(
-          f"⚠️ [PCM ODD BYTE COUNT] "
-          f"Dropping final byte from {len(frame)} byte frame."
-      )
       frame = frame[:-1]
-
     if not frame:
       return
 
-    # Always preserve raw customer audio for the final WAV.
+    # Preserve the complete downlink for the final customer WAV.
     self.customer_pcm.extend(frame)
 
     if not self.is_connected:
-      print(
-          f"⚠️ [PCM DROP] "
-          f"Connection already closed | bytes={len(frame)}"
-      )
       return
 
-    # Exactly ONE append to the STT buffer per incoming frame.
-    self.audio_buffer.extend(frame)
-
-    audio_frame = np.frombuffer(
-        frame,
-        dtype=np.int16,
-    )
-
+    audio_frame = np.frombuffer(frame, dtype=np.int16)
     if audio_frame.size == 0:
       return
 
     rms_energy = float(
-        np.sqrt(
-            np.mean(
-                audio_frame.astype(np.float32) ** 2
-            )
-        )
+        np.sqrt(np.mean(audio_frame.astype(np.float32) ** 2))
     )
-
     current_time = time.time()
+    speech_frame = rms_energy >= self.ENERGY_THRESHOLD
 
-    print(
-        f"📥 [PCM RX] "
-        f"frame={len(frame)} | "
-        f"recorded={len(self.customer_pcm)} | "
-        f"stt_buffer={len(self.audio_buffer)} | "
-        f"rms={rms_energy:.2f} | "
-        f"ai_speaking={self.is_ai_speaking}"
-    )
+    # While idle, retain only a short pre-roll. Silence is no longer
+    # allowed to grow the Whisper buffer to ~96 KB.
+    if not self.is_user_talking:
+      self.pre_roll_buffer.extend(frame)
+      if len(self.pre_roll_buffer) > self.PRE_ROLL_MAX_BYTES:
+        del self.pre_roll_buffer[
+            :len(self.pre_roll_buffer) - self.PRE_ROLL_MAX_BYTES
+        ]
 
-    if rms_energy > self.ENERGY_THRESHOLD:
-      self.is_user_talking = True
+      if speech_frame:
+        self.is_user_talking = True
+        self.silence_start_time = None
+        self.audio_buffer.clear()
+        self.audio_buffer.extend(self.pre_roll_buffer)
+        self.pre_roll_buffer.clear()
+        print(
+            f"🟢 [SPEECH START] rms={rms_energy:.2f} | "
+            f"buffer={len(self.audio_buffer)}"
+        )
+      else:
+        print(
+            f"📥 [PCM RX] frame={len(frame)} | "
+            f"recorded={len(self.customer_pcm)} | "
+            f"stt_buffer=0 | rms={rms_energy:.2f} | "
+            f"ai_speaking={self.is_ai_speaking}"
+        )
+        return
+    else:
+      self.audio_buffer.extend(frame)
+
+    if speech_frame:
       self.silence_start_time = None
-
-    elif self.is_user_talking and self.silence_start_time is None:
+    elif self.silence_start_time is None:
       self.silence_start_time = current_time
 
     silence_duration = (
@@ -537,29 +542,36 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         else 0.0
     )
 
-    should_dispatch = (
-        self.is_user_talking
-        and silence_duration >= self.SILENCE_DURATION_SEC
-    ) or (
-        len(self.audio_buffer) >= self.MAX_BUFFER_BYTES
+    print(
+        f"📥 [PCM RX] frame={len(frame)} | "
+        f"recorded={len(self.customer_pcm)} | "
+        f"stt_buffer={len(self.audio_buffer)} | "
+        f"rms={rms_energy:.2f} | "
+        f"silence={silence_duration:.2f}s | "
+        f"ai_speaking={self.is_ai_speaking}"
     )
 
-    if should_dispatch and len(self.audio_buffer) > 4000:
+    should_dispatch = (
+        silence_duration >= self.SILENCE_DURATION_SEC
+        or len(self.audio_buffer) >= self.MAX_BUFFER_BYTES
+    )
+
+    if should_dispatch:
       raw_buffer = bytes(self.audio_buffer)
+      self.audio_buffer.clear()
+      self.is_user_talking = False
+      self.silence_start_time = None
+      self.pre_roll_buffer.clear()
+
+      if len(raw_buffer) <= 4000:
+        return
 
       print(
           f"🎙️ [SPEECH CHUNK READY] "
           f"Processing {len(raw_buffer)} bytes..."
       )
-
-      self.audio_buffer.clear()
-      self.is_user_talking = False
-      self.silence_start_time = None
-
       self.create_background_task(
-          self.safe_process_audio_transcription(
-              raw_buffer
-          )
+          self.safe_process_audio_transcription(raw_buffer)
       )
 
   async def safe_process_audio_transcription(
@@ -695,13 +707,22 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
           words = clean_check.split()
 
-          # Accept only useful transcript
-          if (
-              user_text
-              and len(clean_check) >= 4
-              and len(words) >= 2
+          # Telephone conversations contain valid one-word turns.
+          allowed_single_words = {
+              "hello", "hi", "yes", "no", "okay", "ok",
+              "sure", "correct", "right", "wait", "repeat",
+          }
+          useful_transcript = (
+              bool(user_text)
+              and len(clean_check) >= 2
               and clean_check not in hallucinations
-          ):
+              and (
+                  len(words) >= 2
+                  or clean_check in allowed_single_words
+              )
+          )
+
+          if useful_transcript:
               print(
                   f"✅ [CUSTOMER TRANSCRIPT]: "
                   f"{user_text}"
@@ -806,18 +827,20 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         # asyncio.to_thread() inside generate_voice_pcm_bytes().
         # The lock prevents greeting TTS and response TTS from
         # hitting XTTS concurrently.
-        async with self.tts_processing_lock:
-          pcm_bytes = await generate_voice_pcm_bytes(
-              greeting_text
-          )
+        self.is_tts_generating = True
+        try:
+          async with self.tts_processing_lock:
+            pcm_bytes = await generate_voice_pcm_bytes(
+                greeting_text
+            )
+        finally:
+          self.is_tts_generating = False
 
         if pcm_bytes and self.is_connected:
           self.is_ai_speaking = True
           self.ai_pcm.extend(pcm_bytes)
           await self.send(bytes_data=pcm_bytes)
-          await asyncio.sleep(
-              len(pcm_bytes) / 32000.0
-          )
+          await asyncio.sleep(len(pcm_bytes) / 32000.0)
 
       except asyncio.CancelledError:
         print("⚠️ [GREETING TASK CANCELLED]")
@@ -873,7 +896,6 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     )
 
     try:
-      self.is_ai_speaking = True
       client = ollama.AsyncClient()
       response_stream = await client.generate(
           model="llama3.2", prompt=prompt_context, stream=True
@@ -894,20 +916,38 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
         for sentence in sentences:
           if sentence.strip():
-            async with self.tts_processing_lock:
-              pcm_bytes = await generate_voice_pcm_bytes(sentence)
+            self.is_tts_generating = True
+            try:
+              async with self.tts_processing_lock:
+                pcm_bytes = await generate_voice_pcm_bytes(sentence)
+            finally:
+              self.is_tts_generating = False
+
             if pcm_bytes and self.is_connected:
-              self.ai_pcm.extend(pcm_bytes)
-              await self.send(bytes_data=pcm_bytes)
-              await asyncio.sleep(len(pcm_bytes) / 32000.0)
+              self.is_ai_speaking = True
+              try:
+                self.ai_pcm.extend(pcm_bytes)
+                await self.send(bytes_data=pcm_bytes)
+                await asyncio.sleep(len(pcm_bytes) / 32000.0)
+              finally:
+                self.is_ai_speaking = False
 
       if sentence_buffer.strip() and self.is_connected:
-        async with self.tts_processing_lock:
-          pcm_bytes = await generate_voice_pcm_bytes(sentence_buffer)
+        self.is_tts_generating = True
+        try:
+          async with self.tts_processing_lock:
+            pcm_bytes = await generate_voice_pcm_bytes(sentence_buffer)
+        finally:
+          self.is_tts_generating = False
+
         if pcm_bytes and self.is_connected:
-          self.ai_pcm.extend(pcm_bytes)
-          await self.send(bytes_data=pcm_bytes)
-          await asyncio.sleep(len(pcm_bytes) / 32000.0)
+          self.is_ai_speaking = True
+          try:
+            self.ai_pcm.extend(pcm_bytes)
+            await self.send(bytes_data=pcm_bytes)
+            await asyncio.sleep(len(pcm_bytes) / 32000.0)
+          finally:
+            self.is_ai_speaking = False
 
       if accumulated_text and self.is_connected:
         print(f"🗣️ [AI RESPONSE COMPLETE]: {accumulated_text.strip()}")
