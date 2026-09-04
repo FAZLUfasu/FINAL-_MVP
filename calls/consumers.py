@@ -160,9 +160,11 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
   async def connect(self):
     try:
       await self.accept()
+
       self.is_connected = True
       self.greeting_sent = False
       self.is_ai_speaking = False
+
       self.client_phone = None
       self.session_id = None
       self.lead_details = ""
@@ -171,25 +173,55 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
       self.customer_pcm = bytearray()
       self.ai_pcm = bytearray()
-
       self.audio_buffer = bytearray()
+
       self.silence_start_time = None
       self.is_user_talking = False
-      self.ENERGY_THRESHOLD = 15
-      self.SILENCE_DURATION_SEC = 0.5
-      self.MAX_BUFFER_BYTES = 32000
 
+      # Customer VAD / endpointing
+      self.ENERGY_THRESHOLD = 15
+      self.SILENCE_DURATION_SEC = 0.7
+      self.MAX_BUFFER_BYTES = 96000
+
+      # Inactivity watchdog
       self.INACTIVITY_TIMEOUT_SECONDS = 120.0
       self.last_activity_time = time.time()
 
-      self.timeout_checker_task = asyncio.create_task(
+      # Serialize expensive pipeline stages
+      self.stt_processing_lock = asyncio.Lock()
+      self.ai_processing_lock = asyncio.Lock()
+      self.tts_processing_lock = asyncio.Lock()
+
+      # Track tasks so disconnect can cancel cleanly
+      self.background_tasks = set()
+
+      self.timeout_checker_task = self.create_background_task(
           self.monitor_inactivity_timeout()
       )
-      print("🌐 [WS CONNECT] Single synchronized pipeline channel established.")
+
+      print(
+          "🌐 [WS CONNECT] "
+          "Single synchronized pipeline channel established."
+      )
+
     except Exception as e:
-      print(f"❌ [WS CONNECT ERROR]: {e}")
+      print(
+          f"❌ [WS CONNECT ERROR]: "
+          f"{type(e).__name__}: {e}"
+      )
+      self.is_connected = False
       await self.close()
 
+  def create_background_task(self, coro):
+    task = asyncio.create_task(coro)
+
+    self.background_tasks.add(task)
+
+    task.add_done_callback(
+        self.background_tasks.discard
+    )
+
+    return task
   async def monitor_inactivity_timeout(self):
     try:
       while self.is_connected:
@@ -207,196 +239,561 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     except asyncio.CancelledError:
       pass
 
+
   async def disconnect(self, close_code):
+    print(
+        f"🔌 [WS DISCONNECT] "
+        f"Connection severed. Code: {close_code}"
+    )
+
+    # --------------------------------------------------
+    # 1. MARK CONNECTION CLOSED
+    # --------------------------------------------------
     self.is_connected = False
     self.greeting_sent = False
+
+    # --------------------------------------------------
+    # 2. CANCEL TIMEOUT CHECKER
+    # --------------------------------------------------
     if hasattr(self, "timeout_checker_task"):
-      self.timeout_checker_task.cancel()
+        self.timeout_checker_task.cancel()
 
+    # --------------------------------------------------
+    # 3. CANCEL STT / LLAMA / TTS / GREETING TASKS
+    # --------------------------------------------------
+    if hasattr(self, "background_tasks"):
+        current_task = asyncio.current_task()
+
+        tasks_to_cancel = [
+            task
+            for task in list(self.background_tasks)
+            if task is not current_task
+            and not task.done()
+        ]
+
+        for task in tasks_to_cancel:
+            task.cancel()
+
+        if tasks_to_cancel:
+            print(
+                f"🛑 [TASK CLEANUP] "
+                f"Cancelling {len(tasks_to_cancel)} "
+                f"background task(s)..."
+            )
+
+            await asyncio.gather(
+                *tasks_to_cancel,
+                return_exceptions=True,
+            )
+
+        self.background_tasks.clear()
+
+    # --------------------------------------------------
+    # 4. CALCULATE CALL DURATION
+    # --------------------------------------------------
     duration = time.time() - self.start_time
-    print(f"🔌 [WS DISCONNECT] Connection severed. Code: {close_code}")
 
+    # --------------------------------------------------
+    # 5. SAVE RECORDINGS + SESSION
+    # --------------------------------------------------
     if self.session_id:
-      asyncio.create_task(
-          self.finalize_call_session(
-              self.session_id, duration, self.call_transcript_log
+        try:
+            await self.finalize_call_session(
+                self.session_id,
+                duration,
+                self.call_transcript_log,
+            )
+
+            print(
+                f"✅ [SESSION FINALIZED] "
+                f"ID: {self.session_id}"
+            )
+
+        except Exception as e:
+            print(
+                f"❌ [FINALIZE SESSION ERROR]: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    # --------------------------------------------------
+    # 6. CLEAR STT BUFFER
+    # --------------------------------------------------
+    self.audio_buffer.clear()
+
+    print(
+        "✅ [WS CLEANUP COMPLETE]"
+    )
+
+  async def receive(self, text_data=None, bytes_data=None):
+    # This is intentionally the first diagnostic in receive().
+    # It proves whether Daphne/Channels delivered a text or binary WS frame.
+    print(
+        "📨 [WS RECEIVE ENTER] "
+        f"text={'YES' if text_data is not None else 'NO'} | "
+        f"bytes={'YES' if bytes_data is not None else 'NO'} | "
+        f"byte_len={len(bytes_data) if bytes_data is not None else 0}"
+    )
+
+    self.last_activity_time = time.time()
+
+    # ==========================================================
+    # 1. RAW BINARY WEBSOCKET FRAME = CUSTOMER PCM
+    # ==========================================================
+    # Handle binary FIRST so no JSON/text return can bypass it.
+    if bytes_data is not None:
+      await self.handle_customer_pcm(bytes_data)
+      return
+
+    # ==========================================================
+    # 2. TEXT / JSON WEBSOCKET FRAME
+    # ==========================================================
+    if text_data is None:
+      return
+
+    try:
+      parsed_json = json.loads(text_data)
+
+    except json.JSONDecodeError:
+      clean_text = text_data.strip()
+
+      if (
+          clean_text
+          and not clean_text.startswith("{")
+          and clean_text not in [
+              "HELLO_SERVER",
+              "__SYSTEM_CONNECTION_INITIALIZED__",
+          ]
+      ):
+        self.create_background_task(
+            self.safe_process_text_inference(clean_text)
+        )
+      return
+
+    # Legacy/base64 customer audio support. Decode it and route it
+    # through exactly the same PCM handler as raw WS binary frames.
+    if "audio" in parsed_json:
+      try:
+        import base64
+
+        decoded_audio = base64.b64decode(
+            parsed_json["audio"],
+            validate=True,
+        )
+
+        print(
+            f"📦 [BASE64 AUDIO DECODED] "
+            f"bytes={len(decoded_audio)}"
+        )
+
+        await self.handle_customer_pcm(decoded_audio)
+
+      except Exception as e:
+        print(
+            f"❌ [BASE64 AUDIO ERROR]: "
+            f"{type(e).__name__}: {e}"
+        )
+      return
+
+    # Metadata binds the websocket to one call/session.
+    if (
+        "client_phone_number" in parsed_json
+        or parsed_json.get("event") == "client_phone_number"
+    ):
+      self.client_phone = parsed_json.get("client_phone_number")
+      self.lead_details = parsed_json.get(
+          "lead_details",
+          parsed_json.get("details", ""),
+      )
+
+      if self.session_id is None:
+        self.session_id = await self.create_call_session(
+            self.client_phone
+        )
+
+      print(
+          f"📱 [METADATA BOUND] "
+          f"Session active. Phone: {self.client_phone} | "
+          f"DB ID: {self.session_id}"
+      )
+
+      if not self.greeting_sent:
+        self.greeting_sent = True
+        self.create_background_task(
+            self.trigger_initial_greeting()
+        )
+      return
+
+    if parsed_json.get("event") == "call_answered":
+      if not self.greeting_sent:
+        self.greeting_sent = True
+        self.create_background_task(
+            self.trigger_initial_greeting()
+        )
+      return
+
+    if parsed_json.get("event") == "call_state_changed":
+      print(
+          "📞 [TELEMETRY REGISTRY] Hardware Line Changed: "
+          f"{parsed_json.get('state')}"
+      )
+      return
+
+    user_text = str(
+        parsed_json.get(
+            "text",
+            parsed_json.get(
+                "message",
+                parsed_json.get("prompt", ""),
+            ),
+        )
+        or ""
+    ).strip()
+
+    if user_text and user_text not in [
+        "HELLO_SERVER",
+        "__SYSTEM_CONNECTION_INITIALIZED__",
+    ]:
+      self.create_background_task(
+          self.safe_process_text_inference(user_text)
+      )
+
+  async def handle_customer_pcm(self, bytes_data):
+    """Store, meter, endpoint and dispatch one customer PCM frame."""
+    if bytes_data is None:
+      return
+
+    if not isinstance(bytes_data, (bytes, bytearray, memoryview)):
+      print(
+          f"❌ [PCM TYPE ERROR] "
+          f"Unsupported type: {type(bytes_data).__name__}"
+      )
+      return
+
+    frame = bytes(bytes_data)
+
+    if not frame:
+      return
+
+    if len(frame) % 2 != 0:
+      print(
+          f"⚠️ [PCM ODD BYTE COUNT] "
+          f"Dropping final byte from {len(frame)} byte frame."
+      )
+      frame = frame[:-1]
+
+    if not frame:
+      return
+
+    # Always preserve raw customer audio for the final WAV.
+    self.customer_pcm.extend(frame)
+
+    if not self.is_connected:
+      print(
+          f"⚠️ [PCM DROP] "
+          f"Connection already closed | bytes={len(frame)}"
+      )
+      return
+
+    # Exactly ONE append to the STT buffer per incoming frame.
+    self.audio_buffer.extend(frame)
+
+    audio_frame = np.frombuffer(
+        frame,
+        dtype=np.int16,
+    )
+
+    if audio_frame.size == 0:
+      return
+
+    rms_energy = float(
+        np.sqrt(
+            np.mean(
+                audio_frame.astype(np.float32) ** 2
+            )
+        )
+    )
+
+    current_time = time.time()
+
+    print(
+        f"📥 [PCM RX] "
+        f"frame={len(frame)} | "
+        f"recorded={len(self.customer_pcm)} | "
+        f"stt_buffer={len(self.audio_buffer)} | "
+        f"rms={rms_energy:.2f} | "
+        f"ai_speaking={self.is_ai_speaking}"
+    )
+
+    if rms_energy > self.ENERGY_THRESHOLD:
+      self.is_user_talking = True
+      self.silence_start_time = None
+
+    elif self.is_user_talking and self.silence_start_time is None:
+      self.silence_start_time = current_time
+
+    silence_duration = (
+        current_time - self.silence_start_time
+        if self.silence_start_time is not None
+        else 0.0
+    )
+
+    should_dispatch = (
+        self.is_user_talking
+        and silence_duration >= self.SILENCE_DURATION_SEC
+    ) or (
+        len(self.audio_buffer) >= self.MAX_BUFFER_BYTES
+    )
+
+    if should_dispatch and len(self.audio_buffer) > 4000:
+      raw_buffer = bytes(self.audio_buffer)
+
+      print(
+          f"🎙️ [SPEECH CHUNK READY] "
+          f"Processing {len(raw_buffer)} bytes..."
+      )
+
+      self.audio_buffer.clear()
+      self.is_user_talking = False
+      self.silence_start_time = None
+
+      self.create_background_task(
+          self.safe_process_audio_transcription(
+              raw_buffer
           )
       )
 
-    self.audio_buffer.clear()
+  async def safe_process_audio_transcription(
+    self,
+    raw_audio_bytes,
+):
+    async with self.stt_processing_lock:
 
-  async def receive(self, text_data=None, bytes_data=None):
-    self.last_activity_time = time.time()
+        if not self.is_connected:
+            return
 
-    if text_data:
-      try:
-        parsed_json = json.loads(text_data)
-
-        if "audio" in parsed_json:
-          import base64
-
-          bytes_data = base64.b64decode(parsed_json["audio"])
-        else:
-          if (
-              "client_phone_number" in parsed_json
-              or parsed_json.get("event") == "client_phone_number"
-          ):
-            self.client_phone = parsed_json.get("client_phone_number")
-            self.lead_details = parsed_json.get(
-                "lead_details", parsed_json.get("details", "")
+        try:
+            await self.process_audio_transcription(
+                raw_audio_bytes
             )
-            self.session_id = await self.create_call_session(self.client_phone)
-            print(f"📱 [METADATA BOUND] Session active. ID: {self.client_phone}")
 
-            if not self.greeting_sent:
-              self.greeting_sent = True
-              asyncio.create_task(self.trigger_initial_greeting())
-            return
+        except asyncio.CancelledError:
+            print("⚠️ [STT TASK CANCELLED]")
+            raise
 
-          if parsed_json.get("event") == "call_answered":
-            if not self.greeting_sent:
-              self.greeting_sent = True
-              asyncio.create_task(self.trigger_initial_greeting())
-            return
-
-          if parsed_json.get("event") == "call_state_changed":
+        except Exception as e:
             print(
-                "📞 [TELEMETRY REGISTRY] Hardware Line Changed:"
-                f" {parsed_json.get('state')}"
+                f"❌ [STT PIPELINE ERROR]: "
+                f"{type(e).__name__}: {e}"
             )
+  
+  async def process_audio_transcription(
+      self,
+      raw_audio_bytes,
+  ):
+      try:
+          print(
+              f"🧠 [STT START] "
+              f"PCM bytes={len(raw_audio_bytes)} | "
+              f"ai_speaking={self.is_ai_speaking}"
+          )
+
+          pcm_int16 = np.frombuffer(
+              raw_audio_bytes,
+              dtype=np.int16,
+          )
+
+          if len(pcm_int16) == 0:
+              print(
+                  "⚠️ [STT EMPTY] "
+                  "No PCM samples received."
+              )
+              return
+
+          audio_float32 = (
+              pcm_int16.astype(np.float32)
+              / 32768.0
+          )
+
+          max_peak = np.max(
+              np.abs(audio_float32)
+          )
+
+          rms = np.sqrt(
+              np.mean(
+                  pcm_int16.astype(np.float32) ** 2
+              )
+          )
+
+          print(
+              f"🧠 [STT AUDIO] "
+              f"samples={len(pcm_int16)} | "
+              f"peak={max_peak:.4f} | "
+              f"rms={rms:.2f}"
+          )
+
+          # Ignore essentially silent chunks
+          if rms < 20:
+              print(
+                  f"⚠️ [STT SKIP SILENCE] "
+                  f"rms={rms:.2f}"
+              )
+              return
+
+          # Gain normalization
+          if max_peak > 0.01:
+              audio_float32 = (
+                  audio_float32 / max_peak
+              )
+
+          print("🧠 [WHISPER START]")
+
+          segments, info = await asyncio.to_thread(
+              whisper_model.transcribe,
+              audio_float32,
+              beam_size=1,
+              language="en",
+              condition_on_previous_text=False,
+              vad_filter=True,
+              vad_parameters={
+                  "min_silence_duration_ms": 300,
+              },
+          )
+
+          segments = list(segments)
+
+          print(
+              f"🧠 [WHISPER SEGMENTS] "
+              f"count={len(segments)}"
+          )
+
+          user_text = "".join(
+              segment.text
+              for segment in segments
+          ).strip()
+
+          print(
+              f"🗣️ [WHISPER RESULT]: "
+              f"'{user_text}'"
+          )
+
+          clean_check = re.sub(
+              r"[^\w\s]",
+              "",
+              user_text.lower(),
+          ).strip()
+
+          hallucinations = [
+              "you you",
+              "thank you",
+              "subtitles",
+              "bye",
+              "amaraorg",
+              "mb",
+              "thank you for watching",
+              "thanks for watching",
+          ]
+
+          words = clean_check.split()
+
+          # Accept only useful transcript
+          if (
+              user_text
+              and len(clean_check) >= 4
+              and len(words) >= 2
+              and clean_check not in hallucinations
+          ):
+              print(
+                  f"✅ [CUSTOMER TRANSCRIPT]: "
+                  f"{user_text}"
+              )
+
+              self.call_transcript_log.append(
+                  f"Customer: {user_text}"
+              )
+
+              if self.is_connected:
+                  self.create_background_task(
+                      self.safe_process_text_inference(
+                          user_text
+                      )
+                  )
+
+          else:
+              print(
+                  f"⚠️ [WHISPER IGNORED]: "
+                  f"'{user_text}'"
+              )
+
+      except asyncio.CancelledError:
+          raise
+
+      except Exception as e:
+          print(
+              f"❌ [TRANSCRIPTION FAIL]: "
+              f"{type(e).__name__}: {e}"
+          )
+
+  async def safe_process_text_inference(
+    self,
+    user_text,
+):
+    async with self.ai_processing_lock:
+
+        if not self.is_connected:
             return
 
-          user_text = parsed_json.get(
-              "text",
-              parsed_json.get("message", parsed_json.get("prompt", "")),
-          ).strip()
-          if user_text and user_text not in [
-              "HELLO_SERVER",
-              "__SYSTEM_CONNECTION_INITIALIZED__",
-          ]:
-            asyncio.create_task(self.process_text_inference(user_text))
-          return
+        try:
+            print(
+                f"🔒 [AI LOCK ACQUIRED] "
+                f"Processing: '{user_text}'"
+            )
 
-      except json.JSONDecodeError:
-        clean_text = text_data.strip()
-        if clean_text and not clean_text.startswith("{"):
-          asyncio.create_task(self.process_text_inference(clean_text))
-        return
+            await self.process_text_inference(
+                user_text
+            )
 
-    if bytes_data:
-      # Capture all raw incoming customer frame data immediately
-      self.customer_pcm.extend(bytes_data)
+        except asyncio.CancelledError:
+            print(
+                "⚠️ [AI PIPELINE TASK CANCELLED]"
+            )
+            raise
 
-      if not self.is_connected or self.is_ai_speaking:
-        return
+        except Exception as e:
+            print(
+                f"❌ [AI PIPELINE ERROR]: "
+                f"{type(e).__name__}: {e}"
+            )
 
-      self.audio_buffer.extend(bytes_data)
-      audio_frame = np.frombuffer(bytes_data, dtype=np.int16)
-
-      if len(audio_frame) == 0:
-        return
-
-      rms_energy = np.sqrt(np.mean(audio_frame.astype(np.float32) ** 2))
-      current_time = time.time()
-
-      if rms_energy > self.ENERGY_THRESHOLD:
-        self.is_user_talking = True
-        self.silence_start_time = None
-      else:
-        if self.is_user_talking and self.silence_start_time is None:
-          self.silence_start_time = current_time
-
-      silence_duration = (
-          (current_time - self.silence_start_time)
-          if self.silence_start_time
-          else 0.0
-      )
-
-      should_dispatch = (
-          self.is_user_talking and silence_duration >= self.SILENCE_DURATION_SEC
-      ) or (len(self.audio_buffer) >= self.MAX_BUFFER_BYTES)
-
-      if should_dispatch and len(self.audio_buffer) > 4000:
-        print(
-            "🎙️ [SPEECH CHUNK READY] Processing"
-            f" {len(self.audio_buffer)} bytes..."
-        )
-        raw_buffer = bytes(self.audio_buffer)
-        self.audio_buffer.clear()
-        self.is_user_talking = False
-        self.silence_start_time = None
-
-        asyncio.create_task(self.process_audio_transcription(raw_buffer))
-
-  async def process_audio_transcription(self, raw_audio_bytes):
-    try:
-      if self.is_ai_speaking:
-        print("🎤 [FEEDBACK GUARD] AI is speaking, ignoring input.")
-        return
-
-      pcm_int16 = np.frombuffer(raw_audio_bytes, dtype=np.int16)
-      if len(pcm_int16) == 0:
-        return
-
-      audio_float32 = pcm_int16.astype(np.float32) / 32768.0
-
-      # Dynamic Audio Gain Normalization for quiet microphones
-      max_peak = np.max(np.abs(audio_float32))
-      if max_peak > 0.01:
-        audio_float32 = audio_float32 / max_peak
-
-      segments, _ = await asyncio.to_thread(
-          whisper_model.transcribe,
-          audio_float32,
-          beam_size=1,
-          language="en",
-          condition_on_previous_text=False,
-          vad_filter=True,
-          vad_parameters={"min_silence_duration_ms": 300},
-      )
-
-      user_text = "".join(segment.text for segment in segments).strip()
-      clean_check = re.sub(r"[^\w\s]", "", user_text.lower()).strip()
-
-      hallucinations = [
-          "you",
-          "you you",
-          "thank you",
-          "subtitles",
-          "bye",
-          "amaraorg",
-          "mb",
-          "thank you for watching",
-          "thanks for watching",
-      ]
-
-      if (
-          user_text
-          and len(clean_check) >= 2
-          and clean_check not in hallucinations
-      ):
-        print(f"🗣️ [WHISPER TRANSCRIPT]: {user_text}")
-        if self.is_connected:
-          asyncio.create_task(self.process_text_inference(user_text))
-      else:
-        print(f"⚠️ [WHISPER IGNORED]: Empty or hallucinated: '{user_text}'")
-
-    except Exception as e:
-      print(f"❌ [TRANSCRIPTION FAIL]: {e}")
-
+        finally:
+            print(
+                "🔓 [AI LOCK RELEASED]"
+            )
   async def trigger_initial_greeting(self):
-    await asyncio.sleep(0.4)
-    script_data = await self.get_active_script()
+    try:
+      await asyncio.sleep(0.4)
 
-    greeting_text = (
-        script_data["greeting"]
-        if script_data
-        else "Hello! How can I help you today?"
-    )
+      if not self.is_connected:
+        return
 
-    if self.is_connected:
-      print(f"🗣️ [INITIAL GREETING]: {greeting_text}")
-      self.call_transcript_log.append(f"AI Agent: {greeting_text}")
+      script_data = await self.get_active_script()
+
+      greeting_text = (
+          script_data["greeting"]
+          if script_data
+          else "Hello! How can I help you today?"
+      )
+
+      if not self.is_connected:
+        return
+
+      print(
+          f"🗣️ [INITIAL GREETING]: "
+          f"{greeting_text}"
+      )
+
+      self.call_transcript_log.append(
+          f"AI Agent: {greeting_text}"
+      )
 
       await self.safe_send({
           "type": "ai_response",
@@ -405,24 +802,52 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
       })
 
       try:
-        self.is_ai_speaking = True
-        pcm_bytes = await generate_voice_pcm_bytes(greeting_text)
+        # The synthesis itself is already offloaded with
+        # asyncio.to_thread() inside generate_voice_pcm_bytes().
+        # The lock prevents greeting TTS and response TTS from
+        # hitting XTTS concurrently.
+        async with self.tts_processing_lock:
+          pcm_bytes = await generate_voice_pcm_bytes(
+              greeting_text
+          )
+
         if pcm_bytes and self.is_connected:
+          self.is_ai_speaking = True
           self.ai_pcm.extend(pcm_bytes)
           await self.send(bytes_data=pcm_bytes)
-          await asyncio.sleep(len(pcm_bytes) / 32000.0)
-      except Exception as e:
-        print(f"⚠️ [GREETING ERROR]: {e}")
-      finally:
-          self.is_ai_speaking = False
-          print(
-              "🎧 [CUSTOMER DOWNLINK READY] "
-              "Waiting for remote customer audio..."
+          await asyncio.sleep(
+              len(pcm_bytes) / 32000.0
           )
+
+      except asyncio.CancelledError:
+        print("⚠️ [GREETING TASK CANCELLED]")
+        raise
+
+      except Exception as e:
+        print(
+            f"⚠️ [GREETING AUDIO ERROR]: "
+            f"{type(e).__name__}: {e}"
+        )
+
+      finally:
+        self.is_ai_speaking = False
+        print(
+            "🎧 [CUSTOMER DOWNLINK READY] "
+            "Waiting for remote customer audio..."
+        )
+
+    except asyncio.CancelledError:
+      raise
+
+    except Exception as e:
+      self.is_ai_speaking = False
+      print(
+          f"❌ [GREETING ERROR]: "
+          f"{type(e).__name__}: {e}"
+      )
 
   async def process_text_inference(self, user_text):
     print(f"🤖 [LLAMA TRIGGERED] Processing: '{user_text}'")
-    self.call_transcript_log.append(f"Customer: {user_text}")
 
     await self.safe_send({
         "type": "user_transcript",
@@ -469,14 +894,16 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
         for sentence in sentences:
           if sentence.strip():
-            pcm_bytes = await generate_voice_pcm_bytes(sentence)
+            async with self.tts_processing_lock:
+              pcm_bytes = await generate_voice_pcm_bytes(sentence)
             if pcm_bytes and self.is_connected:
               self.ai_pcm.extend(pcm_bytes)
               await self.send(bytes_data=pcm_bytes)
               await asyncio.sleep(len(pcm_bytes) / 32000.0)
 
       if sentence_buffer.strip() and self.is_connected:
-        pcm_bytes = await generate_voice_pcm_bytes(sentence_buffer)
+        async with self.tts_processing_lock:
+          pcm_bytes = await generate_voice_pcm_bytes(sentence_buffer)
         if pcm_bytes and self.is_connected:
           self.ai_pcm.extend(pcm_bytes)
           await self.send(bytes_data=pcm_bytes)
