@@ -1,3 +1,4 @@
+
 import asyncio
 import io
 import json
@@ -466,7 +467,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             await self.accept()
 
             self.is_connected = True
-            self.call_is_active = True
+            self.call_is_active = False
             self.greeting_sent = False
 
             self.is_ai_speaking = False
@@ -613,17 +614,109 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 "reason": reason,
             })
 
+
+    def _normalize_turn_text(self, text: str) -> str:
+        return re.sub(
+            r"[^a-z0-9\s]",
+            "",
+            str(text or "").lower(),
+        ).strip()
+
+    def _is_permission_turn(self, text: str):
+        normalized = self._normalize_turn_text(text)
+
+        allow = {
+            "yes", "yeah", "yep", "okay", "ok", "sure",
+            "go ahead", "please tell me", "tell me",
+            "continue", "you can", "please continue",
+        }
+
+        refuse = {
+            "no", "no thanks", "no thank you",
+            "not interested", "stop", "dont call", "do not call",
+        }
+
+        if normalized in allow:
+            return "ALLOW"
+
+        if normalized in refuse:
+            return "REFUSE"
+
+        return None
+
+    def _is_low_value_turn(self, text: str) -> bool:
+        normalized = self._normalize_turn_text(text)
+
+        return normalized in {
+            "hello", "hi", "hey", "hii",
+            "hmm", "hm", "uh", "um",
+        }
+
     async def submit_user_turn(self, user_text: str):
         """
-        LATEST TURN WINS:
-        - no FIFO ai_processing_lock
-        - old AI generation/playback is cancelled
-        - only the newest recognized customer turn gets a response
+        Latest MEANINGFUL turn wins.
+
+        Valid new customer questions/statements can supersede an older AI turn.
+        But low-value greetings like "Hello" must not repeatedly cancel an
+        important permission answer such as "Okay" while Llama is thinking.
         """
         user_text = (user_text or "").strip()
-        if not user_text or not self.is_connected or not self.call_is_active:
+
+        if (
+            not user_text
+            or not self.is_connected
+            or not self.call_is_active
+        ):
             return
 
+        active_task = (
+            self.current_ai_task is not None
+            and not self.current_ai_task.done()
+        )
+
+        pending_text = str(
+            getattr(self, "last_customer_text", "") or ""
+        ).strip()
+
+        incoming_permission = self._is_permission_turn(user_text)
+        pending_permission = self._is_permission_turn(pending_text)
+
+        if active_task:
+            # Protect a pending YES/OK/NO permission decision from a later
+            # telephone greeting while the model is still generating.
+            if (
+                pending_permission is not None
+                and self._is_low_value_turn(user_text)
+                and incoming_permission is None
+            ):
+                print(
+                    "🛡️ [TURN PROTECTED] "
+                    f"pending='{pending_text}' | ignored='{user_text}'"
+                )
+                return
+
+            # Do not let greetings repeatedly supersede greetings.
+            if (
+                self._is_low_value_turn(pending_text)
+                and self._is_low_value_turn(user_text)
+            ):
+                print(
+                    "🛡️ [LOW-VALUE TURN IGNORED] "
+                    f"pending='{pending_text}' | incoming='{user_text}'"
+                )
+                return
+
+            # Exact duplicate while its AI turn is still running.
+            if (
+                self._normalize_turn_text(user_text)
+                == self._normalize_turn_text(pending_text)
+            ):
+                print(
+                    f"🛡️ [DUPLICATE TURN IGNORED] '{user_text}'"
+                )
+                return
+
+        # Meaningful validated customer speech still supersedes the old turn.
         await self.cancel_current_ai(
             reason=f"new_customer_turn:{user_text[:40]}",
             notify_client=True,
@@ -636,11 +729,13 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         task = asyncio.create_task(
             self.process_text_inference(user_text, my_generation)
         )
+
         self.current_ai_task = task
         self.background_tasks.add(task)
 
         def _done(t):
             self.background_tasks.discard(t)
+
             if self.current_ai_task is t:
                 self.current_ai_task = None
 
@@ -848,11 +943,9 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 f"DB ID={self.session_id}"
             )
 
-            if not self.greeting_sent:
-                self.greeting_sent = True
-                self.greeting_task = self.create_background_task(
-                    self.trigger_initial_greeting()
-                )
+            # Metadata only binds this websocket to the DB/session.
+            # The outbound cellular call may still be dialing or ringing.
+            # Do NOT start the greeting here.
             return
 
         if event == "call_answered":
@@ -870,7 +963,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
             print(f"📞 [CALL STATE] {state}")
 
-            active_states = {"ACTIVE", "4", "OFFHOOK", "ANSWERED"}
+            active_states = {"ACTIVE", "4", "ANSWERED"}
             ended_states = {
                 "DISCONNECTED",
                 "DISCONNECTING",
@@ -882,6 +975,21 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
             if state in active_states:
                 self.call_is_active = True
+
+                if not self.greeting_sent:
+                    self.greeting_sent = True
+                    print("✅ [CALL ANSWER CONFIRMED] Starting greeting now.")
+                    self.greeting_task = self.create_background_task(
+                        self.trigger_initial_greeting()
+                    )
+
+            elif state == "OFFHOOK":
+                # OFFHOOK can occur while an outgoing call is still dialing/
+                # alerting on some Android devices. Hold the greeting.
+                print(
+                    "⏳ [CALL NOT ANSWERED YET] "
+                    "OFFHOOK received; greeting is waiting for ACTIVE."
+                )
 
             elif state in ended_states:
                 self.call_is_active = False
@@ -978,33 +1086,6 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                     f"buffer={len(self.audio_buffer)}"
                 )
 
-                # True barge-in starts as soon as real customer speech starts,
-                # not after Whisper finishes the utterance.
-                if (
-                    self.is_ai_speaking
-                    or self.is_tts_generating
-                    or (
-                        self.current_ai_task is not None
-                        and not self.current_ai_task.done()
-                    )
-                    or (
-                        self.greeting_task is not None
-                        and not self.greeting_task.done()
-                    )
-                ):
-                    print("✋ [BARGE-IN DETECTED] Customer interrupted AI.")
-
-                    # Cancel greeting separately if still running.
-                    if (
-                        self.greeting_task is not None
-                        and not self.greeting_task.done()
-                    ):
-                        self.greeting_task.cancel()
-
-                    await self.cancel_current_ai(
-                        reason="customer_barge_in",
-                        notify_client=True,
-                    )
             else:
                
                 return
@@ -1198,6 +1279,19 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             }
 
             words = clean_check.split()
+
+            # Reject obvious Whisper repetition hallucinations caused by
+            # low-level telephone noise, for example:
+            # "Okay. Okay. Okay. Okay. ..."
+            #
+            # A genuine one-word reply such as "Okay." is still accepted.
+            if len(words) >= 4 and len(set(words)) == 1:
+                print(
+                    f"⚠️ [WHISPER REPETITION IGNORED]: "
+                    f"'{user_text}'"
+                )
+                return
+
             useful = (
                 bool(user_text)
                 and len(clean_check) >= 2
@@ -2757,23 +2851,91 @@ Return ONLY valid JSON:
             if script:
                 return {
                     "config_source": "company_script",
-                    "bot_name": script.bot_name,
-                    "company": script.company_name,
-                    "details": script.build_ai_knowledge(),
-                    "greeting": script.opening_greeting,
-                    "closing": script.closing_statement,
-                    "followup_message": script.human_followup_message,
-                    "default_language": script.default_language,
-                    "company_phone": script.company_phone,
-                    "whatsapp_number": script.whatsapp_number,
-                    "company_email": script.company_email,
-                    "company_address": script.company_address,
-                    "website_url": script.website_url,
-                    "google_maps_url": script.google_maps_url,
-                    "whatsapp_url": script.whatsapp_url,
-                    "instagram_url": script.instagram_url,
-                    "facebook_url": script.facebook_url,
-                    "youtube_url": script.youtube_url,
+                    "bot_name": getattr(
+                        script,
+                        "bot_name",
+                        "AI Assistant",
+                    ) or "AI Assistant",
+                    "company": getattr(
+                        script,
+                        "company_name",
+                        "Brainex AI Institute",
+                    ) or "Brainex AI Institute",
+                    "details": (
+                        script.build_ai_knowledge()
+                        if hasattr(script, "build_ai_knowledge")
+                        else getattr(script, "company_details", "") or ""
+                    ),
+                    "greeting": getattr(
+                        script,
+                        "opening_greeting",
+                        "",
+                    ) or "",
+                    "closing": getattr(
+                        script,
+                        "closing_statement",
+                        "",
+                    ) or "",
+                    "followup_message": getattr(
+                        script,
+                        "human_followup_message",
+                        "",
+                    ) or "",
+                    "default_language": getattr(
+                        script,
+                        "default_language",
+                        "English",
+                    ) or "English",
+                    "company_phone": getattr(
+                        script,
+                        "company_phone",
+                        "",
+                    ) or "",
+                    "whatsapp_number": getattr(
+                        script,
+                        "whatsapp_number",
+                        "",
+                    ) or "",
+                    "company_email": getattr(
+                        script,
+                        "company_email",
+                        "",
+                    ) or "",
+                    "company_address": getattr(
+                        script,
+                        "company_address",
+                        "",
+                    ) or "",
+                    "website_url": getattr(
+                        script,
+                        "website_url",
+                        "",
+                    ) or "",
+                    "google_maps_url": getattr(
+                        script,
+                        "google_maps_url",
+                        "",
+                    ) or "",
+                    "whatsapp_url": getattr(
+                        script,
+                        "whatsapp_url",
+                        "",
+                    ) or "",
+                    "instagram_url": getattr(
+                        script,
+                        "instagram_url",
+                        "",
+                    ) or "",
+                    "facebook_url": getattr(
+                        script,
+                        "facebook_url",
+                        "",
+                    ) or "",
+                    "youtube_url": getattr(
+                        script,
+                        "youtube_url",
+                        "",
+                    ) or "",
                     "products": [],
                     "collection_fields": [],
                     "company_id": self.company_id,
