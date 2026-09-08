@@ -44,20 +44,101 @@ class CallQueueItemAdmin(admin.ModelAdmin):
 
 @admin.register(CompanyScript)
 class CompanyScriptAdmin(admin.ModelAdmin):
-    list_display = ('company_name', 'bot_name', 'active_status_badge', 'updated_at')
-    list_filter = ('is_active',)
-    search_fields = ('company_name', 'company_details')
+    list_display = (
+        "company_name",
+        "bot_name",
+        "tagline",
+        "active_status_badge",
+        "updated_at",
+    )
+    list_filter = ("is_active",)
+    search_fields = (
+        "company_name",
+        "company_description",
+        "products_services",
+        "target_audience",
+        "frequently_asked_questions",
+    )
+    readonly_fields = ("updated_at",)
+
+    fieldsets = (
+        (
+            "Company Identity",
+            {
+                "fields": (
+                    "company_name",
+                    "bot_name",
+                    "tagline",
+                    "company_description",
+                    "is_active",
+                )
+            },
+        ),
+        (
+            "Products & Audience",
+            {
+                "fields": (
+                    "target_audience",
+                    "products_services",
+                    "key_benefits",
+                    "course_durations",
+                    "pricing_information",
+                )
+            },
+        ),
+        (
+            "Contact & FAQ",
+            {
+                "fields": (
+                    "working_hours",
+                    "contact_information",
+                    "frequently_asked_questions",
+                )
+            },
+        ),
+        (
+            "AI Sales Configuration",
+            {
+                "fields": (
+                    "sales_objective",
+                    "data_to_collect",
+                    "ai_rules",
+                )
+            },
+        ),
+        (
+            "Call Opening & Closing",
+            {
+                "fields": (
+                    "opening_greeting",
+                    "closing_statement",
+                )
+            },
+        ),
+        (
+            "Legacy / Additional Information",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "company_details",
+                    "updated_at",
+                ),
+            },
+        ),
+    )
 
     @admin.display(description="Active Status")
     def active_status_badge(self, obj):
         if obj.is_active:
             return format_html(
-                '<span style="background-color: #d1fae5; color: #065f46; padding: 4px 10px; '
-                'border-radius: 12px; font-weight: 600; font-size: 11px;">Active</span>'
+                '<span style="background-color: #d1fae5; color: #065f46; '
+                'padding: 4px 10px; border-radius: 12px; font-weight: 600; '
+                'font-size: 11px;">Active</span>'
             )
         return format_html(
-            '<span style="background-color: #f3f4f6; color: #374151; padding: 4px 10px; '
-            'border-radius: 12px; font-weight: 600; font-size: 11px;">Inactive</span>'
+            '<span style="background-color: #f3f4f6; color: #374151; '
+            'padding: 4px 10px; border-radius: 12px; font-weight: 600; '
+            'font-size: 11px;">Inactive</span>'
         )
 
 

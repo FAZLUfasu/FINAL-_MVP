@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Telicall AI Test Console</title>
+<style>
+:root{--bg:#f4f7fb;--panel:#fff;--text:#162033;--muted:#667085;--line:#e4e7ec;--primary:#123f73;--primary2:#1769aa;--soft:#eef5fc;--danger:#b42318}
+*{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text)}
+.page{width:min(1180px,calc(100% - 32px));margin:28px auto}.header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:18px}
+.header h1{margin:0;font-size:28px}.header p{margin:6px 0 0;color:var(--muted)}.chip{background:var(--soft);color:var(--primary);padding:10px 14px;border-radius:999px;font-weight:700}
+.grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:18px}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:0 8px 24px rgba(16,24,40,.05)}
+.side{padding:20px;height:fit-content}.side h2{margin:0 0 18px;font-size:18px}label{display:block;font-size:13px;font-weight:700;margin:14px 0 7px}
+input,textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:11px 12px;font:inherit;outline:none;background:#fff}textarea{min-height:100px;resize:vertical}
+button{border:0;border-radius:10px;padding:11px 16px;font-weight:700;cursor:pointer}.primary{width:100%;margin-top:16px;background:var(--primary);color:#fff}
+.primary:disabled,.send:disabled{opacity:.55;cursor:not-allowed}.chat{min-height:680px;display:flex;flex-direction:column;overflow:hidden}
+.top{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:center}.top strong{display:block}.top small{color:var(--muted)}
+.state-row{display:flex;gap:8px;flex-wrap:wrap}.state{background:#f2f4f7;border:1px solid var(--line);border-radius:999px;padding:6px 9px;font-size:11px;font-weight:700}
+.messages{flex:1;padding:18px;overflow-y:auto;min-height:480px;max-height:620px}.empty{color:var(--muted);text-align:center;padding:80px 24px}
+.msg{display:flex;margin-bottom:14px}.msg.customer{justify-content:flex-end}.bubble{max-width:78%;padding:11px 13px;border-radius:14px;line-height:1.45;white-space:pre-wrap}
+.assistant .bubble{background:var(--soft);border:1px solid #d8e8f8;border-bottom-left-radius:4px}.customer .bubble{background:var(--primary);color:#fff;border-bottom-right-radius:4px}
+.meta{color:var(--muted);font-size:11px;margin-top:5px}.composer{padding:14px;border-top:1px solid var(--line);display:flex;gap:10px}.composer input{flex:1}.send{min-width:92px;background:var(--primary2);color:#fff}
+.error{color:var(--danger);font-size:13px;margin-top:10px;min-height:18px}.profile{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+.profile h3{font-size:14px;margin:0 0 10px}.profile-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12px}.profile-grid span:nth-child(odd){color:var(--muted)}
+@media(max-width:850px){.grid{grid-template-columns:1fr}.header{align-items:flex-start;flex-direction:column}.bubble{max-width:90%}}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <div><h1>Telicall AI Test Console</h1><p>Same conversation engine as the live Telicall call.</p></div>
+    <div class="chip">{{ active_company }}</div>
+  </div>
+
+  <div class="grid">
+    <section class="card side">
+      <h2>Test Lead Information</h2>
+
+      <label for="leadName">Lead Name *</label>
+      <input id="leadName" type="text" placeholder="Example: Fazlu" autocomplete="off">
+
+      <label for="leadPhone">Mobile Number *</label>
+      <input id="leadPhone" type="text" placeholder="Example: 9876543210" autocomplete="off">
+
+      <label for="leadDetails">Lead Details / Notes</label>
+      <textarea id="leadDetails" placeholder="Example: Student interested in practical AI training"></textarea>
+
+      <button id="startBtn" class="primary" type="button">Start Conversation</button>
+      <div id="formError" class="error"></div>
+
+      <div class="profile">
+        <h3>Live Conversation State</h3>
+        <div class="profile-grid">
+          <span>Stage</span><strong id="pStage">WAIT_PERMISSION</strong>
+          <span>Interest</span><strong id="pInterest">UNDECIDED</strong>
+          <span>Customer Type</span><strong id="pType">—</strong>
+          <span>Education</span><strong id="pEducation">—</strong>
+          <span>Occupation</span><strong id="pOccupation">—</strong>
+          <span>Interest Area</span><strong id="pArea">—</strong>
+          <span>Course Interest</span><strong id="pCourse">—</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="card chat">
+      <div class="top">
+        <div><strong>{{ active_bot }}</strong><small>Natural conversation test</small></div>
+        <div class="state-row">
+          <span id="stageBadge" class="state">WAIT_PERMISSION</span>
+          <span id="timeBadge" class="state">—</span>
+        </div>
+      </div>
+
+      <div id="messages" class="messages">
+        <div class="empty">Enter lead information and click <strong>Start Conversation</strong>.</div>
+      </div>
+
+      <div class="composer">
+        <input id="messageInput" type="text" placeholder="Type the customer's reply..." disabled autocomplete="off">
+        <button id="sendBtn" class="send" type="button" disabled>Send</button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+const OPENING_GREETING = "{{ opening_greeting|escapejs }}";
+const RESPOND_URL = "/api/ai-test/respond/";
+
+let conversationStarted = false;
+let conversationStage = "WAIT_PERMISSION";
+let conversationHistory = [];
+let customerProfile = defaultProfile();
+
+const leadName = document.getElementById("leadName");
+const leadPhone = document.getElementById("leadPhone");
+const leadDetails = document.getElementById("leadDetails");
+const startBtn = document.getElementById("startBtn");
+const input = document.getElementById("messageInput");
+const sendBtn = document.getElementById("sendBtn");
+const messages = document.getElementById("messages");
+const formError = document.getElementById("formError");
+const stageBadge = document.getElementById("stageBadge");
+const timeBadge = document.getElementById("timeBadge");
+
+function defaultProfile(){
+  return {
+    customer_type:null,
+    education:null,
+    occupation:null,
+    interest_area:null,
+    course_interest:null,
+    interest_status:"UNDECIDED",
+    needs_more_information:false,
+    ready_to_join:false,
+    callback_requested:false
+  };
+}
+
+function getCookie(name){
+  const row=document.cookie.split(";").map(x=>x.trim()).find(x=>x.startsWith(name+"="));
+  return row ? decodeURIComponent(row.substring(name.length+1)) : "";
+}
+
+function personalizeGreeting(text,name){
+  let greeting=String(text||"").trim();
+  const person=String(name||"").trim();
+
+  if(!greeting){
+    greeting="Hello, I'm the AI calling assistant from Brainex AI Institute. May I briefly tell you about our practical AI training programs?";
+  }
+
+  if(!person) return greeting;
+
+  if(/^hello\b/i.test(greeting)){
+    return greeting.replace(/^hello[\s,!.:-]*/i,`Hello ${person}, `);
+  }
+
+  if(/^hi\b/i.test(greeting)){
+    return greeting.replace(/^hi[\s,!.:-]*/i,`Hi ${person}, `);
+  }
+
+  return `Hello ${person}, ${greeting}`;
+}
+
+function addMessage(role,text,meta=""){
+  messages.querySelector(".empty")?.remove();
+
+  const outer=document.createElement("div");
+  outer.className=`msg ${role}`;
+
+  const inner=document.createElement("div");
+  const bubble=document.createElement("div");
+  bubble.className="bubble";
+  bubble.textContent=text;
+  inner.appendChild(bubble);
+
+  if(meta){
+    const metaEl=document.createElement("div");
+    metaEl.className="meta";
+    metaEl.textContent=meta;
+    inner.appendChild(metaEl);
+  }
+
+  outer.appendChild(inner);
+  messages.appendChild(outer);
+  messages.scrollTop=messages.scrollHeight;
+}
+
+function updateState(){
+  stageBadge.textContent=conversationStage;
+  document.getElementById("pStage").textContent=conversationStage;
+  document.getElementById("pInterest").textContent=customerProfile.interest_status||"UNDECIDED";
+  document.getElementById("pType").textContent=customerProfile.customer_type||"—";
+  document.getElementById("pEducation").textContent=customerProfile.education||"—";
+  document.getElementById("pOccupation").textContent=customerProfile.occupation||"—";
+  document.getElementById("pArea").textContent=customerProfile.interest_area||"—";
+  document.getElementById("pCourse").textContent=customerProfile.course_interest||"—";
+}
+
+function setBusy(busy){
+  sendBtn.disabled=busy||!conversationStarted;
+  input.disabled=busy||!conversationStarted;
+  startBtn.disabled=busy;
+  sendBtn.textContent=busy?"Thinking...":"Send";
+}
+
+function startConversation(){
+  const name=leadName.value.trim();
+  const phone=leadPhone.value.trim();
+
+  if(!name){
+    formError.textContent="Lead name is required.";
+    leadName.focus();
+    return;
+  }
+
+  if(!phone){
+    formError.textContent="Mobile number is required.";
+    leadPhone.focus();
+    return;
+  }
+
+  formError.textContent="";
+
+  // Reset ONLY when starting a new conversation.
+  conversationStage="WAIT_PERMISSION";
+  customerProfile=defaultProfile();
+  conversationHistory=[];
+  messages.innerHTML="";
+
+  const greeting=personalizeGreeting(OPENING_GREETING,name);
+  addMessage("assistant",greeting,"Opening greeting");
+
+  // Critical: remember the opening greeting.
+  conversationHistory.push({
+    role:"assistant",
+    text:greeting
+  });
+
+  conversationStarted=true;
+  input.disabled=false;
+  sendBtn.disabled=false;
+  timeBadge.textContent="—";
+  updateState();
+  input.focus();
+}
+
+async function sendMessage(){
+  if(!conversationStarted) return;
+
+  const message=input.value.trim();
+  if(!message) return;
+
+  const payload={
+    message:message,
+    lead:{
+      name:leadName.value.trim(),
+      phone_number:leadPhone.value.trim(),
+      details:leadDetails.value.trim()
+    },
+    history:conversationHistory.slice(-20),
+    stage:conversationStage,
+    customer_profile:customerProfile
+  };
+
+  addMessage("customer",message);
+  input.value="";
+  formError.textContent="";
+  setBusy(true);
+
+  try{
+    const response=await fetch(RESPOND_URL,{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "X-CSRFToken":getCookie("csrftoken")
+      },
+      credentials:"same-origin",
+      body:JSON.stringify(payload)
+    });
+
+    const data=await response.json();
+
+    if(!response.ok){
+      throw new Error(data.error||`HTTP ${response.status}`);
+    }
+
+    // CRITICAL: persist the returned stage.
+    if(data.stage){
+      conversationStage=String(data.stage).toUpperCase();
+    }
+
+    if(data.customer_profile && typeof data.customer_profile==="object"){
+      customerProfile={...customerProfile,...data.customer_profile};
+    }
+
+    if(data.interest_status){
+      customerProfile.interest_status=data.interest_status;
+    }
+
+    customerProfile.needs_more_information=Boolean(data.needs_more_information);
+    customerProfile.ready_to_join=Boolean(data.ready_to_join);
+    customerProfile.callback_requested=Boolean(data.callback_requested);
+
+    // Add the successful turn to history.
+    conversationHistory.push({role:"user",text:message});
+    conversationHistory.push({role:"assistant",text:data.reply});
+
+    if(conversationHistory.length>24){
+      conversationHistory=conversationHistory.slice(-24);
+    }
+
+    addMessage(
+      "assistant",
+      data.reply,
+      `${data.model||"llama3.2"} • ${data.response_time_seconds ?? "?"}s`
+    );
+
+    timeBadge.textContent=`${data.response_time_seconds ?? "?"}s`;
+    updateState();
+
+  }catch(error){
+    formError.textContent=error.message||"Unable to get AI response.";
+    addMessage(
+      "assistant",
+      "The request failed. Check the Django/Daphne console.",
+      "Error"
+    );
+  }finally{
+    setBusy(false);
+    input.focus();
+  }
+}
+
+startBtn.addEventListener("click",startConversation);
+sendBtn.addEventListener("click",sendMessage);
+
+input.addEventListener("keydown",event=>{
+  if(event.key==="Enter"&&!event.shiftKey){
+    event.preventDefault();
+    sendMessage();
+  }
+});
+
+updateState();
+</script>
+</body>
+</html>
