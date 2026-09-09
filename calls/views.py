@@ -586,3 +586,70 @@ def ai_test_respond(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
+import json
+
+from django.http import JsonResponse
+from django.views.decorators.http import require_http_methods
+
+from .models import SystemSettings
+
+
+@require_http_methods(["GET", "PUT", "POST"])
+def system_settings_view(request):
+    settings_obj = SystemSettings.get_settings()
+
+    if request.method == "GET":
+        return JsonResponse({
+            "success": True,
+            "recording_retention_days":
+                settings_obj.recording_retention_days,
+            "automatic_recording_cleanup":
+                settings_obj.automatic_recording_cleanup,
+        })
+
+    try:
+        data = json.loads(
+            request.body.decode("utf-8")
+        )
+
+        if "recording_retention_days" in data:
+            days = int(
+                data["recording_retention_days"]
+            )
+
+            if days < 1 or days > 365:
+                return JsonResponse(
+                    {
+                        "success": False,
+                        "message":
+                            "Retention must be between 1 and 365 days.",
+                    },
+                    status=400,
+                )
+
+            settings_obj.recording_retention_days = days
+
+        if "automatic_recording_cleanup" in data:
+            settings_obj.automatic_recording_cleanup = bool(
+                data["automatic_recording_cleanup"]
+            )
+
+        settings_obj.save()
+
+        return JsonResponse({
+            "success": True,
+            "message": "Settings saved successfully.",
+            "recording_retention_days":
+                settings_obj.recording_retention_days,
+            "automatic_recording_cleanup":
+                settings_obj.automatic_recording_cleanup,
+        })
+
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": str(exc),
+            },
+            status=400,
+        )

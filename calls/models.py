@@ -291,3 +291,51 @@ class CompanyScript(models.Model):
           f" ({'Active' if self.is_active else 'Inactive'})"
       )
 
+class SystemSettings(models.Model):
+    """Global Telicall system settings."""
+
+    RETENTION_CHOICES = [
+        (1, "1 Day"),
+        (3, "3 Days"),
+        (5, "5 Days"),
+        (7, "7 Days"),
+        (15, "15 Days"),
+        (30, "30 Days"),
+        (60, "60 Days"),
+        (90, "90 Days"),
+    ]
+
+    recording_retention_days = models.PositiveIntegerField(
+        choices=RETENTION_CHOICES,
+        default=5,
+        help_text=(
+            "Customer and AI response recordings older than "
+            "this period will automatically be deleted."
+        ),
+    )
+
+    automatic_recording_cleanup = models.BooleanField(
+        default=True,
+        help_text=(
+            "Enable or disable automatic deletion of expired "
+            "customer and AI call recordings."
+        ),
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    @classmethod
+    def get_settings(cls):
+        obj, _ = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                "recording_retention_days": 5,
+                "automatic_recording_cleanup": True,
+            },
+        )
+        return obj
+
+    def __str__(self):
+        return "Telicall Recording Settings"

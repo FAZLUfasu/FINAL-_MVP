@@ -784,20 +784,25 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     # ------------------------------------------------------------------
     # DISCONNECT
     # ------------------------------------------------------------------
-
+    
     async def disconnect(self, close_code):
         print(f"🔌 [WS DISCONNECT] Code: {close_code}")
 
         self.is_connected = False
         self.call_is_active = False
         self.greeting_sent = False
+
+        # Invalidate any old AI/TTS generation.
         self.turn_generation += 1
 
+        # Stop inactivity watcher.
         if self.timeout_checker_task:
             self.timeout_checker_task.cancel()
+            self.timeout_checker_task = None
 
         # Cancel dedicated AI/greeting tasks first.
         tasks_to_cancel = []
+
         for task in [self.current_ai_task, self.greeting_task]:
             if task is not None and not task.done():
                 task.cancel()
@@ -805,8 +810,13 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
         # Cancel every remaining tracked task except ourselves.
         current = asyncio.current_task()
+
         for task in list(self.background_tasks):
-            if task is not current and not task.done() and task not in tasks_to_cancel:
+            if (
+                task is not current
+                and not task.done()
+                and task not in tasks_to_cancel
+            ):
                 task.cancel()
                 tasks_to_cancel.append(task)
 
@@ -815,41 +825,101 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 f"🛑 [TASK CLEANUP] Cancelling "
                 f"{len(tasks_to_cancel)} background task(s)..."
             )
-            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+            try:
+                await asyncio.gather(
+                    *tasks_to_cancel,
+                    return_exceptions=True,
+                )
+            except Exception as e:
+                print(
+                    f"⚠️ [TASK CLEANUP ERROR] "
+                    f"{type(e).__name__}: {e}"
+                )
 
         self.background_tasks.clear()
         self.current_ai_task = None
         self.greeting_task = None
 
-        duration = time.time() - self.start_time
+        duration = max(
+            0.0,
+            time.time() - self.start_time,
+        )
 
+        # ------------------------------------------------------------------
+        # CRITICAL:
+        # Save status + BOTH WAV recordings immediately.
+        #
+        # Do this BEFORE post-call Llama analysis. Daphne can kill a slow
+        # disconnect handler, so recordings must already be persisted first.
+        # ------------------------------------------------------------------
         if self.session_id:
             try:
-                # STEP 2: analyze the completed call into a structured sales
-                # report. If Llama is temporarily unavailable, the analyzer
-                # returns a deterministic fallback based on live call state.
-                self.final_call_report = await self.analyze_completed_call()
-
-                # STEP 3: save recordings + structured report under the
-                # CallSession via its existing SalesInsight one-to-one model.
                 await self.finalize_call_session(
                     self.session_id,
                     duration,
                     self.call_transcript_log,
-                    self.final_call_report,
+                    None,
                 )
+
                 print(
-                    f"✅ [SESSION FINALIZED] ID: {self.session_id} | "
-                    f"outcome={self.final_call_report.get('outcome')}"
+                    f"💾 [IMMEDIATE CALL SAVE COMPLETE] "
+                    f"ID={self.session_id} | "
+                    f"customer_pcm={len(self.customer_pcm)} bytes | "
+                    f"ai_pcm={len(self.ai_pcm)} bytes"
                 )
+
             except Exception as e:
                 print(
-                    f"❌ [FINALIZE SESSION ERROR] "
+                    f"❌ [IMMEDIATE CALL SAVE ERROR] "
                     f"{type(e).__name__}: {e}"
                 )
 
-        self.audio_buffer.clear()
-        self.pre_roll_buffer.clear()
+        # ------------------------------------------------------------------
+        # Slow post-call analysis comes AFTER the recordings are safe.
+        # If Daphne cancels this section, status/audio remain saved.
+        # ------------------------------------------------------------------
+        if self.session_id:
+            try:
+                self.final_call_report = await self.analyze_completed_call()
+
+                await self.save_sales_insight(
+                    self.session_id,
+                    self.final_call_report,
+                )
+
+                print(
+                    f"✅ [POST-CALL REPORT SAVED] "
+                    f"ID={self.session_id} | "
+                    f"outcome={self.final_call_report.get('outcome')}"
+                )
+
+            except asyncio.CancelledError:
+                print(
+                    "⚠️ [POST-CALL ANALYSIS CANCELLED] "
+                    "CallSession status and recordings are already saved."
+                )
+
+            except Exception as e:
+                print(
+                    f"❌ [POST-CALL REPORT ERROR] "
+                    f"{type(e).__name__}: {e}"
+                )
+                print(
+                    "✅ [CALL DATA SAFE] "
+                    "CallSession status and recordings are already saved."
+                )
+
+        try:
+            self.audio_buffer.clear()
+        except Exception:
+            pass
+
+        try:
+            self.pre_roll_buffer.clear()
+        except Exception:
+            pass
+
         print("✅ [WS CLEANUP COMPLETE]")
 
     # ------------------------------------------------------------------
@@ -1400,336 +1470,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 "🎧 [CUSTOMER DOWNLINK READY] Waiting for remote customer audio..."
             )
 
-    # ------------------------------------------------------------------
-    # LLM + TTS
-    # ------------------------------------------------------------------
-
-#     async def process_text_inference(
-#         self,
-#         user_text: str,
-#         my_generation: int,
-#     ):
-#         """
-#         STEP 1:
-#         Controlled company telecalling with:
-#         - conversation memory
-#         - explicit stages
-#         - structured customer information extraction
-#         - sales/qualification behavior
-
-#         One Llama call returns both the spoken reply and structured state so
-#         we do not add a second LLM latency hit on every customer turn.
-#         """
-#         try:
-#             if (
-#                 not self.is_connected
-#                 or not self.call_is_active
-#                 or my_generation != self.turn_generation
-#             ):
-#                 return
-
-#             pipeline_start = time.perf_counter()
-#             print(
-#                 f"⏱️ [PIPELINE START] gen={my_generation}"
-#             )
-#             print(
-#                 f"🤖 [CONTROLLED AI TURN] gen={my_generation} | "
-#                 f"stage={self.conversation_stage} | "
-#                 f"Customer='{user_text}'"
-#             )
-
-#             await self.safe_send({
-#                 "type": "user_transcript",
-#                 "sender": "Customer",
-#                 "text": user_text,
-#             })
-
-#             config = await self.get_runtime_configuration()
-#             config = config or self.default_brainex_configuration()
-
-#             # Fast deterministic rules for explicit opt-out/callback phrases.
-#             # These override uncertain model classifications.
-#             forced = self.apply_explicit_customer_intent(user_text)
-
-#             history_for_prompt = self.conversation_history[-6:]
-#             history_text = "\n".join(
-#                 f"{'AI' if item.get('role') == 'assistant' else 'Customer'}: "
-#                 f"{_compact_text(item.get('text'), 160)}"
-#                 for item in history_for_prompt
-#             ) or "(No previous turns)"
-
-#             profile_for_prompt = json.dumps(
-#                 self.customer_profile,
-#                 ensure_ascii=False,
-#             )
-
-#             stage_objective = self.get_stage_objective(
-#                 self.conversation_stage
-#             )
-
-#             system_prompt = f"""
-# You are the official AI telecalling assistant for {config['company']}.
-
-# IDENTITY
-# - Company: {config['company']}
-# - Caller name: {config['bot_name']}
-# - This is a commercial telephone conversation.
-# - Be transparent that you are the company's AI calling assistant if identity
-#   becomes relevant. Never pretend to be a human.
-
-# COMPANY / PRODUCT KNOWLEDGE
-# {config['details']}
-
-# CURRENT CAMPAIGN / LEAD CONTEXT
-# {self.lead_details or 'No additional lead context supplied.'}
-
-# CURRENT CONVERSATION STAGE
-# {self.conversation_stage}
-
-# CURRENT STAGE OBJECTIVE
-# {stage_objective}
-
-# KNOWN CUSTOMER PROFILE
-# {profile_for_prompt}
-
-# SALES BEHAVIOUR
-# - Your purpose is to understand whether the customer is interested in the
-#   company's products/services and qualify the lead respectfully.
-# - Keep every spoken reply natural and short for a phone call, normally
-#   1-2 sentences and preferably under 25 spoken words.
-# - Ask only ONE main question at a time.
-# - Do not repeat a question whose answer is already known.
-# - Do not behave like a general-purpose chatbot.
-# - Keep unrelated questions brief and bring the discussion back to the
-#   company offering.
-# - Never invent fees, batches, schedules, discounts, guarantees, products,
-#   approvals, locations, or any fact not present in COMPANY / PRODUCT
-#   KNOWLEDGE or lead context.
-# - If exact information is unavailable, say the company team can provide it.
-# - If the customer clearly refuses, stop selling and close politely.
-# - If the customer requests a callback, acknowledge it and close politely.
-# - If the customer wants more details from a person, mark follow-up required.
-# - If the customer clearly wants to purchase/join, mark READY_TO_JOIN.
-# - Do not pressure the customer.
-
-# STAGE GUIDANCE
-# WAIT_PERMISSION:
-#   Determine whether the customer permits the conversation to continue.
-# PROFILE_COLLECTION:
-#   Identify the customer type or relevant background.
-# NEED_DISCOVERY:
-#   Understand what they want to achieve or why they may need the offering.
-# PRODUCT_EXPLANATION:
-#   Explain only the most relevant product/service information.
-# DETAIL_COLLECTION:
-#   Collect useful customer details naturally, one question at a time.
-# INTEREST_CHECK:
-#   Find whether they are interested, need more information, want a callback,
-#   or are ready to proceed.
-# FOLLOW_UP:
-#   Confirm that the company team should contact them.
-# CLOSING:
-#   Give a short polite closing; do not start another sales question.
-# FINISHED:
-#   Do not continue selling.
-
-# Return ONLY a valid JSON object with exactly this shape:
-# {{
-#   "reply": "short spoken response",
-#   "next_stage": "WAIT_PERMISSION|PROFILE_COLLECTION|NEED_DISCOVERY|PRODUCT_EXPLANATION|DETAIL_COLLECTION|INTEREST_CHECK|FOLLOW_UP|CLOSING|FINISHED",
-#   "customer_profile": {{
-#     "customer_type": null,
-#     "education": null,
-#     "occupation": null,
-#     "interest_area": null,
-#     "course_interest": null
-#   }},
-#   "interest_status": "UNDECIDED|NOT_INTERESTED|INTERESTED|NEED_MORE_INFORMATION|READY_TO_JOIN|CALLBACK_REQUESTED",
-#   "needs_more_information": false,
-#   "ready_to_join": false,
-#   "callback_requested": false
-# }}
-
-# Rules for extraction:
-# - Preserve previously known values unless the customer clearly changes them.
-# - Use null for information not actually stated or safely inferred.
-# - Never manufacture customer details.
-# """
-
-#             prompt = (
-#                 f"{system_prompt}\n\n"
-#                 f"RECENT CONVERSATION\n{history_text}\n\n"
-#                 f"CURRENT CUSTOMER MESSAGE\nCustomer: {user_text}\n\n"
-#                 "JSON:"
-#             )
-
-#             llama_start = time.perf_counter()
-#             client = ollama.AsyncClient()
-
-#             response = await client.generate(
-#                 model="llama3.2",
-#                 prompt=prompt,
-#                 stream=False,
-#                 format="json",
-#                 keep_alive="30m",
-#                 options={
-#                     "temperature": 0.1,
-#                     "num_predict": 110,
-#                     "num_ctx": 2048,
-#                     "num_thread": max(1, (os.cpu_count() or 4) - 1),
-#                 },
-#             )
-
-#             if my_generation != self.turn_generation:
-#                 print(
-#                     f"🗑️ [STALE LLM RESULT DROPPED] gen={my_generation}"
-#                 )
-#                 return
-
-#             raw_result = str(response.get("response", "") or "").strip()
-#             decision = _extract_json_object(raw_result)
-
-#             if not decision:
-#                 print(
-#                     "⚠️ [CONTROL JSON PARSE FAIL] "
-#                     f"raw={_compact_text(raw_result, 300)}"
-#                 )
-#                 decision = {
-#                     "reply": raw_result or "Could you please repeat that?",
-#                     "next_stage": self.conversation_stage,
-#                     "customer_profile": {},
-#                     "interest_status": self.customer_profile[
-#                         "interest_status"
-#                     ],
-#                 }
-
-#             # Apply structured extraction before selecting final behavior.
-#             self.apply_ai_decision(decision)
-
-#             # Deterministic explicit user intent always wins.
-#             if forced:
-#                 self.apply_forced_intent(forced, config)
-
-#             reply = _compact_text(decision.get("reply"), 220)
-
-#             if forced == "NOT_INTERESTED":
-#                 reply = (
-#                     config.get("closing")
-#                     or "Thank you for your time. Have a good day."
-#                 )
-#             elif forced == "CALLBACK_REQUESTED":
-#                 reply = (
-#                     "Certainly. I'll note that you would like a callback, "
-#                     "and our team can contact you."
-#                 )
-
-#             if not reply:
-#                 reply = "Could you please repeat that?"
-
-#             # Keep configured/LLM speech telephone-friendly.
-#             if len(reply) > 220:
-#                 reply = reply[:220].rsplit(" ", 1)[0].rstrip(" ,;:")
-#                 if reply and reply[-1] not in ".!?":
-#                     reply += "."
-
-#             # Memory is updated only for the latest accepted generation.
-#             self.conversation_history.append({
-#                 "role": "user",
-#                 "text": user_text,
-#             })
-#             self.conversation_history.append({
-#                 "role": "assistant",
-#                 "text": reply,
-#             })
-#             if len(self.conversation_history) > 24:
-#                 self.conversation_history = self.conversation_history[-24:]
-
-#             print(
-#                 f"⚡ [LLAMA CONTROL READY] "
-#                 f"{time.perf_counter() - llama_start:.2f}s | "
-#                 f"stage={self.conversation_stage} | "
-#                 f"status={self.customer_profile['interest_status']} | "
-#                 f"{reply}"
-#             )
-
-#             if (
-#                 not self.is_connected
-#                 or not self.call_is_active
-#                 or my_generation != self.turn_generation
-#             ):
-#                 return
-
-#             self.is_tts_generating = True
-#             tts_start = time.perf_counter()
-#             try:
-#                 pcm = await generate_voice_pcm_bytes(reply)
-#             finally:
-#                 self.is_tts_generating = False
-
-#             if my_generation != self.turn_generation:
-#                 print(
-#                     f"🗑️ [STALE TTS RESULT DROPPED] gen={my_generation}"
-#                 )
-#                 return
-
-#             print(
-#                 f"⚡ [TTS PIPELINE READY] "
-#                 f"{time.perf_counter() - tts_start:.2f}s"
-#             )
-
-#             if not pcm:
-#                 print("⚠️ [TTS EMPTY] No AI PCM generated.")
-#                 return
-
-#             if not self.is_connected or not self.call_is_active:
-#                 print("🗑️ [AI AUDIO DROPPED] Call no longer active.")
-#                 return
-
-#             await self.safe_send({
-#                 "type": "ai_response",
-#                 "sender": "AI",
-#                 "text": reply,
-#                 "stage": self.conversation_stage,
-#                 "interest_status": self.customer_profile[
-#                     "interest_status"
-#                 ],
-#                 "customer_profile": self.customer_profile,
-#             })
-
-#             await self.stream_pcm_to_client(pcm, my_generation)
-
-#             if (
-#                 self.is_connected
-#                 and self.call_is_active
-#                 and my_generation == self.turn_generation
-#             ):
-#                 self.call_transcript_log.append(f"AI Agent: {reply}")
-#                 print(
-#                     f"✅ [CONTROLLED TURN COMPLETE] "
-#                     f"total={time.perf_counter() - pipeline_start:.2f}s | "
-#                     f"gen={my_generation}"
-#                 )
-#                 print(
-#                     f"⏱️ [PIPELINE TOTAL] "
-#                     f"{time.perf_counter() - pipeline_start:.2f}s"
-#                 )
-
-#         except asyncio.CancelledError:
-#             self.is_ai_speaking = False
-#             self.is_tts_generating = False
-#             print(
-#                 f"🛑 [AI TURN CANCELLED] gen={my_generation} | "
-#                 f"customer='{user_text}'"
-#             )
-#             raise
-
-#         except Exception as e:
-#             self.is_ai_speaking = False
-#             self.is_tts_generating = False
-#             print(
-#                 f"❌ [AI PIPELINE ERROR] "
-#                 f"{type(e).__name__}: {e}"
-#             )
+  
     async def process_text_inference(
         self,
         user_text: str,
@@ -2751,6 +2492,56 @@ Return ONLY valid JSON:
             return None
 
     @database_sync_to_async
+    def mark_call_session_completed(
+        self,
+        session_id,
+        duration,
+    ):
+        """
+        Immediately mark the CallSession as completed when the call/WebSocket
+        ends.
+
+        IMPORTANT:
+        This runs BEFORE slow post-call AI analysis and recording/report
+        finalization so Django Admin does not leave ended calls stuck as ACTIVE.
+        """
+        try:
+            if not session_id:
+                return False
+
+            updated = CallSession.objects.filter(
+                id=session_id
+            ).update(
+                status="completed",
+                duration_seconds=max(
+                    0,
+                    int(duration),
+                ),
+            )
+
+            if updated:
+                print(
+                    f"✅ [CALL SESSION CLOSED] "
+                    f"ID={session_id} | "
+                    f"duration={int(duration)}s | "
+                    f"status=completed"
+                )
+                return True
+
+            print(
+                f"⚠️ [CALL SESSION CLOSE] "
+                f"Session ID={session_id} not found"
+            )
+            return False
+
+        except Exception as e:
+            print(
+                f"❌ [CALL SESSION CLOSE ERROR] "
+                f"{type(e).__name__}: {e}"
+            )
+            return False
+
+    @database_sync_to_async
     def finalize_call_session(
         self,
         session_id,
@@ -2768,7 +2559,7 @@ Return ONLY valid JSON:
 
             timestamp = int(time.time())
 
-            if self.customer_pcm:
+            if self.customer_pcm and not session.recording_file:
                 raw = bytes(self.customer_pcm)
                 if len(raw) % 2:
                     raw = raw[:-1]
@@ -2786,7 +2577,7 @@ Return ONLY valid JSON:
                     save=False,
                 )
 
-            if self.ai_pcm:
+            if self.ai_pcm and not session.ai_recording_file:
                 raw = bytes(self.ai_pcm)
                 if len(raw) % 2:
                     raw = raw[:-1]
@@ -2827,6 +2618,47 @@ Return ONLY valid JSON:
 
         except Exception as e:
             print(f"⚠️ [DB FINALIZE ERROR] {e}")
+
+    @database_sync_to_async
+    def save_sales_insight(
+        self,
+        session_id,
+        report,
+    ):
+        """
+        Save only the structured post-call report.
+
+        Recording files are already persisted before the slow Llama analysis,
+        so this method intentionally does not rewrite either WAV file.
+        """
+        try:
+            if not session_id or not report:
+                return False
+
+            session = CallSession.objects.get(id=session_id)
+
+            SalesInsight.objects.update_or_create(
+                call_session=session,
+                defaults={
+                    "extracted_data": report,
+                    "needs_followup": bool(
+                        report.get("follow_up_required", False)
+                    ),
+                },
+            )
+
+            print(
+                f"📊 [SALES INSIGHT SAVED] "
+                f"CallSession ID={session_id}"
+            )
+            return True
+
+        except Exception as e:
+            print(
+                f"⚠️ [SALES INSIGHT SAVE ERROR] "
+                f"{type(e).__name__}: {e}"
+            )
+            return False
 
     @database_sync_to_async
     def get_runtime_configuration(self):

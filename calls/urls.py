@@ -8,6 +8,7 @@ from .views import (
     export_reports_csv,
     home,
     server_status,
+    system_settings_view,
     update_call_status,
 )
 
@@ -54,5 +55,10 @@ urlpatterns = [
         'api/ai-test/respond/',
         ai_test_respond,
         name='ai_test_respond',
+    ),
+     path(
+        "api/settings/",
+        system_settings_view,
+        name="system-settings",
     ),
 ]
