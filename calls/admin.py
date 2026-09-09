@@ -1,6 +1,8 @@
 from django.contrib import admin
 from django.utils.html import format_html
 
+from unfold.admin import ModelAdmin, StackedInline
+
 from .models import (
     CallQueueItem,
     CallSession,
@@ -9,14 +11,12 @@ from .models import (
     SalesInsight,
     SystemSettings,
 )
-
-
 # ============================================================
 # CALL QUEUE ADMIN
 # ============================================================
 
 @admin.register(CallQueueItem)
-class CallQueueItemAdmin(admin.ModelAdmin):
+class CallQueueItemAdmin(ModelAdmin):
     list_display = (
         "id",
         "name",
@@ -89,7 +89,7 @@ class CallQueueItemAdmin(admin.ModelAdmin):
 # ============================================================
 
 @admin.register(CompanyScript)
-class CompanyScriptAdmin(admin.ModelAdmin):
+class CompanyScriptAdmin(ModelAdmin):
     list_display = (
         "company_name",
         "bot_name",
@@ -216,7 +216,7 @@ class CompanyScriptAdmin(admin.ModelAdmin):
 # SALES INSIGHT INLINE
 # ============================================================
 
-class SalesInsightInline(admin.StackedInline):
+class SalesInsightInline(StackedInline):
     model = SalesInsight
 
     extra = 0
@@ -233,7 +233,7 @@ class SalesInsightInline(admin.StackedInline):
 # ============================================================
 
 @admin.register(CallSession)
-class CallSessionAdmin(admin.ModelAdmin):
+class CallSessionAdmin(ModelAdmin):
     list_display = (
         "id",
         "contact",
@@ -419,7 +419,7 @@ class CallSessionAdmin(admin.ModelAdmin):
 # ============================================================
 
 @admin.register(Contact)
-class ContactAdmin(admin.ModelAdmin):
+class ContactAdmin(ModelAdmin):
     list_display = (
         "name",
         "phone_number",
@@ -441,7 +441,7 @@ class ContactAdmin(admin.ModelAdmin):
 # ============================================================
 
 @admin.register(SalesInsight)
-class SalesInsightAdmin(admin.ModelAdmin):
+class SalesInsightAdmin(ModelAdmin):
     list_display = (
         "call_session",
         "followup_badge",
@@ -494,7 +494,7 @@ class SalesInsightAdmin(admin.ModelAdmin):
 # ============================================================
 
 @admin.register(SystemSettings)
-class SystemSettingsAdmin(admin.ModelAdmin):
+class SystemSettingsAdmin(ModelAdmin):
     list_display = (
         "retention_period",
         "cleanup_status",
