@@ -38,7 +38,7 @@ AudioSegment.ffprobe = (
     r"C:\Users\hp\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe"
 )
 
-from calls.models import CallSession, CompanyScript, Contact, SalesInsight
+from calls.models import CallSession, CompanyScript, Contact, CustomVoice, SalesInsight, SystemSettings
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +85,10 @@ try:
     SAPI_RATE = max(-10, min(10, int(os.getenv("BRAINEX_SAPI_RATE", "1"))))
 except ValueError:
     SAPI_RATE = 1
+try:
+    SAPI_VOLUME = max(0, min(100, int(os.getenv("BRAINEX_SAPI_VOLUME", "100"))))
+except ValueError:
+    SAPI_VOLUME = 100
 
 # 16 kHz, mono, PCM16 = 32,000 bytes/sec
 PCM_SAMPLE_RATE = 16000
@@ -131,12 +135,15 @@ initialize_llama_engine()
 def _sanitize_tts_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", text or "").strip()
     cleaned = re.sub(r"[^\w\s.,?!'\-]", "", cleaned)
-    if len(cleaned) > 180:
-        cleaned = cleaned[:180].rsplit(" ", 1)[0]
     return cleaned.strip()
 
 
-async def generate_sapi_pcm_bytes(text: str) -> bytes:
+async def generate_sapi_pcm_bytes(
+    text: str,
+    voice_name: str = "",
+    rate: int = 1,
+    volume: int = 100,
+) -> bytes:
     """
     Windows-safe offline SAPI TTS.
 
@@ -169,8 +176,9 @@ async def generate_sapi_pcm_bytes(text: str) -> bytes:
     env = os.environ.copy()
     env["BRAINEX_TTS_TEXT"] = cleaned
     env["BRAINEX_TTS_OUT"] = temp_wav
-    env["BRAINEX_TTS_VOICE"] = SAPI_VOICE
-    env["BRAINEX_TTS_RATE"] = str(SAPI_RATE)
+    env["BRAINEX_TTS_VOICE"] = str(voice_name or "").strip()
+    env["BRAINEX_TTS_RATE"] = str(max(-10, min(10, int(rate))))
+    env["BRAINEX_TTS_VOLUME"] = str(max(0, min(100, int(volume))))
 
     ps_script = r"""
 $ErrorActionPreference = 'Stop'
@@ -181,6 +189,7 @@ $text = [Environment]::GetEnvironmentVariable('BRAINEX_TTS_TEXT')
 $out = [Environment]::GetEnvironmentVariable('BRAINEX_TTS_OUT')
 $voice = [Environment]::GetEnvironmentVariable('BRAINEX_TTS_VOICE')
 $rateRaw = [Environment]::GetEnvironmentVariable('BRAINEX_TTS_RATE')
+$volumeRaw = [Environment]::GetEnvironmentVariable('BRAINEX_TTS_VOLUME')
 
 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
 
@@ -200,6 +209,18 @@ try {
     if ($rate -gt 10) { $rate = 10 }
 
     $synth.Rate = $rate
+
+    $volume = 100
+    $parsedVolume = 100
+
+    if ([int]::TryParse($volumeRaw, [ref]$parsedVolume)) {
+        $volume = $parsedVolume
+    }
+
+    if ($volume -lt 0) { $volume = 0 }
+    if ($volume -gt 100) { $volume = 100 }
+
+    $synth.Volume = $volume
 
     # Generate exactly the format expected by Flutter/Android:
     # 16 kHz, mono, signed PCM16.
@@ -368,17 +389,43 @@ finally {
             pass
 
 
-async def generate_voice_pcm_bytes(text: str) -> bytes:
-    # This release intentionally defaults to fast offline SAPI.
-    # XTTS CPU was the primary latency bottleneck in the supplied logs.
-    if TTS_ENGINE == "sapi":
-        return await generate_sapi_pcm_bytes(text)
-
-    print(
-        f"⚠️ [TTS ENGINE] Unsupported BRAINEX_TTS_ENGINE='{TTS_ENGINE}'. "
-        "Falling back to Windows SAPI."
+async def generate_custom_voice_pcm_bytes(text: str, settings: dict) -> bytes:
+    """Custom voice integration point. Safely uses SAPI until a cloning engine is connected."""
+    name = str(settings.get("custom_voice_name", "") or "").strip()
+    samples = settings.get("sample_paths", []) or []
+    print(f"🎙️ [CUSTOM VOICE SELECTED] name={name or '<unnamed>'} | samples={len(samples)}")
+    for i, path in enumerate(samples, 1):
+        print(f"🎧 [CUSTOM VOICE SAMPLE {i}] {path}")
+    print("⚠️ [CUSTOM VOICE ENGINE NOT CONNECTED] Using SAPI fallback so the live call remains operational.")
+    return await generate_sapi_pcm_bytes(
+        text,
+        voice_name=SAPI_VOICE,
+        rate=settings.get("rate", SAPI_RATE),
+        volume=settings.get("volume", SAPI_VOLUME),
     )
-    return await generate_sapi_pcm_bytes(text)
+
+
+async def generate_voice_pcm_bytes(text: str, voice_settings: Optional[dict] = None) -> bytes:
+    settings = voice_settings or {}
+    engine = str(settings.get("engine", TTS_ENGINE) or "sapi").strip().lower()
+    voice_name = str(settings.get("voice_name", SAPI_VOICE) or "").strip()
+    try:
+        rate = max(-10, min(10, int(settings.get("rate", SAPI_RATE))))
+    except (TypeError, ValueError):
+        rate = SAPI_RATE
+    try:
+        volume = max(0, min(100, int(settings.get("volume", SAPI_VOLUME))))
+    except (TypeError, ValueError):
+        volume = SAPI_VOLUME
+
+    settings["rate"] = rate
+    settings["volume"] = volume
+
+    if engine == "custom":
+        return await generate_custom_voice_pcm_bytes(text, settings)
+
+    print(f"🔊 [AI VOICE SETTINGS] engine=sapi | voice={voice_name or '<Windows Default>'} | rate={rate} | volume={volume}")
+    return await generate_sapi_pcm_bytes(text, voice_name=voice_name, rate=rate, volume=volume)
 
 
 
@@ -1439,7 +1486,10 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             my_generation = self.turn_generation
             self.is_tts_generating = True
             try:
-                pcm = await generate_voice_pcm_bytes(greeting)
+                pcm = await generate_voice_pcm_bytes(
+                    greeting,
+                    script_data.get("tts_settings", {}),
+                )
             finally:
                 self.is_tts_generating = False
 
@@ -1892,7 +1942,8 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             try:
                 pcm = (
                     await generate_voice_pcm_bytes(
-                        reply
+                        reply,
+                        config.get("tts_settings", {}),
                     )
                 )
 
@@ -2040,6 +2091,11 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             ),
             "products": [],
             "collection_fields": [],
+            "tts_settings": {
+                "voice_name": SAPI_VOICE,
+                "rate": SAPI_RATE,
+                "volume": SAPI_VOLUME,
+            },
             "company_id": self.company_id,
             "telicall_line_id": self.telicall_line_id,
         }
@@ -2679,6 +2735,68 @@ Return ONLY valid JSON:
         need to be rewritten when multi-company models are introduced.
         """
         try:
+            settings = SystemSettings.get_settings()
+
+            use_default_voice = bool(
+                getattr(settings, "use_system_default_voice", True)
+            )
+
+            configured_voice = str(
+                getattr(settings, "tts_voice_name", "") or ""
+            ).strip()
+
+            voice_name = "" if use_default_voice else configured_voice
+
+            try:
+                tts_rate = max(
+                    -10,
+                    min(10, int(getattr(settings, "tts_rate", 1))),
+                )
+            except (TypeError, ValueError):
+                tts_rate = 1
+
+            try:
+                tts_volume = max(
+                    0,
+                    min(100, int(getattr(settings, "tts_volume", 100))),
+                )
+            except (TypeError, ValueError):
+                tts_volume = 100
+
+            tts_engine = str(
+                getattr(settings, "tts_engine", "sapi") or "sapi"
+            ).strip().lower()
+
+            custom_voice = getattr(settings, "custom_voice", None)
+            custom_voice_id = getattr(custom_voice, "id", None) if custom_voice else None
+            custom_voice_name = str(
+                getattr(custom_voice, "name", "") or ""
+            ).strip() if custom_voice else ""
+            custom_voice_samples = []
+
+            if custom_voice:
+                for field_name in ("sample_1", "sample_2", "sample_3"):
+                    sample = getattr(custom_voice, field_name, None)
+                    if sample:
+                        try:
+                            custom_voice_samples.append(sample.path)
+                        except Exception:
+                            pass
+
+            if tts_engine == "custom" and (not custom_voice or not custom_voice_samples):
+                print("⚠️ [CUSTOM VOICE CONFIG] Missing selected voice/sample; using SAPI fallback.")
+                tts_engine = "sapi"
+
+            tts_settings = {
+                "engine": tts_engine,
+                "voice_name": voice_name,
+                "custom_voice_id": custom_voice_id,
+                "custom_voice_name": custom_voice_name,
+                "sample_paths": custom_voice_samples,
+                "rate": tts_rate,
+                "volume": tts_volume,
+            }
+
             script = CompanyScript.objects.filter(is_active=True).first()
             if script:
                 return {
@@ -2770,6 +2888,7 @@ Return ONLY valid JSON:
                     ) or "",
                     "products": [],
                     "collection_fields": [],
+                    "tts_settings": tts_settings,
                     "company_id": self.company_id,
                     "telicall_line_id": self.telicall_line_id,
                 }

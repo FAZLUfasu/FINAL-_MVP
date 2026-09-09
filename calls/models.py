@@ -290,7 +290,78 @@ class CompanyScript(models.Model):
           f"{self.company_name} Script"
           f" ({'Active' if self.is_active else 'Inactive'})"
       )
+class CustomVoice(models.Model):
+    """Stores reference recordings for a future cloned Telicall AI voice."""
 
+    STATUS_CHOICES = [
+        ("draft", "Draft"),
+        ("ready", "Ready"),
+        ("disabled", "Disabled"),
+    ]
+
+    LANGUAGE_CHOICES = [
+        ("English", "English"),
+        ("Malayalam", "Malayalam"),
+        ("Hindi", "Hindi"),
+        ("Tamil", "Tamil"),
+        ("Other", "Other"),
+    ]
+
+    name = models.CharField(
+        max_length=150,
+        unique=True,
+        help_text="Example: Brainex Female 1",
+    )
+
+    language = models.CharField(
+        max_length=50,
+        choices=LANGUAGE_CHOICES,
+        default="English",
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="draft",
+    )
+
+    description = models.TextField(
+        blank=True,
+        help_text="Optional notes about this voice.",
+    )
+
+    sample_1 = models.FileField(
+        upload_to="custom_voices/",
+        blank=True,
+        null=True,
+        help_text="Upload WAV or record directly in the browser.",
+    )
+
+    sample_2 = models.FileField(
+        upload_to="custom_voices/",
+        blank=True,
+        null=True,
+        help_text="Optional additional voice sample.",
+    )
+
+    sample_3 = models.FileField(
+        upload_to="custom_voices/",
+        blank=True,
+        null=True,
+        help_text="Optional additional voice sample.",
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    def __str__(self):
+        return self.name
+    
 class SystemSettings(models.Model):
     """Global Telicall system settings."""
 
@@ -303,6 +374,16 @@ class SystemSettings(models.Model):
         (30, "30 Days"),
         (60, "60 Days"),
         (90, "90 Days"),
+    ]
+
+    TTS_ENGINE_CHOICES = [
+        ("sapi", "Windows SAPI"),
+        ("custom", "Custom Voice"),
+    ]
+
+    SAPI_VOICE_CHOICES = [
+        ("Microsoft David Desktop", "Microsoft David Desktop - Male"),
+        ("Microsoft Zira Desktop", "Microsoft Zira Desktop - Female"),
     ]
 
     recording_retention_days = models.PositiveIntegerField(
@@ -322,8 +403,50 @@ class SystemSettings(models.Model):
         ),
     )
 
+    # ========================================================
+    # AI VOICE SETTINGS
+    # ========================================================
+
+    tts_engine = models.CharField(
+        max_length=20,
+        choices=TTS_ENGINE_CHOICES,
+        default="sapi",
+        help_text="Select Windows SAPI or a cloned custom voice.",
+    )
+
+    use_system_default_voice = models.BooleanField(
+        default=False,
+        help_text="Use the Windows default voice instead of selecting one.",
+    )
+
+    tts_voice_name = models.CharField(
+        max_length=255,
+        choices=SAPI_VOICE_CHOICES,
+        default="Microsoft Zira Desktop",
+        help_text="Installed Windows SAPI voice.",
+    )
+
+    custom_voice = models.ForeignKey(
+        "CustomVoice",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="system_settings",
+        help_text="Select the custom cloned voice when Voice Engine is Custom Voice.",
+    )
+
+    tts_rate = models.IntegerField(
+        default=-1,
+        help_text="Windows SAPI speech rate from -10 to +10.",
+    )
+
+    tts_volume = models.PositiveIntegerField(
+        default=95,
+        help_text="Speech volume from 0 to 100.",
+    )
+
     updated_at = models.DateTimeField(
-        auto_now=True
+        auto_now=True,
     )
 
     @classmethod
@@ -333,9 +456,14 @@ class SystemSettings(models.Model):
             defaults={
                 "recording_retention_days": 5,
                 "automatic_recording_cleanup": True,
+                "tts_engine": "sapi",
+                "use_system_default_voice": False,
+                "tts_voice_name": "Microsoft Zira Desktop",
+                "tts_rate": -1,
+                "tts_volume": 95,
             },
         )
         return obj
 
     def __str__(self):
-        return "Telicall Recording Settings"
+        return "Telicall System Settings"
