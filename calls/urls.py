@@ -1,3 +1,5 @@
+from . import views
+from django.contrib import admin
 from django.urls import path
 
 from .views import (
@@ -61,4 +63,9 @@ urlpatterns = [
         system_settings_view,
         name="system-settings",
     ),
+    path(
+        'admin/telicall-reports/',
+        admin.site.admin_view(views.telicall_reports_dashboard),
+        name='telicall_reports_dashboard',
+),
 ]

@@ -1,0 +1,278 @@
+{
+  "report_type": "daily",
+  "report_date": "2026-09-10",
+  "generated_at": "2026-09-10T07:54:13.018610+00:00",
+  "summary": {
+    "date": "2026-09-10",
+    "new_leads": 0,
+    "new_lead_status": {
+      "pending": 0,
+      "called": 0,
+      "follow_up": 0
+    },
+    "queue_snapshot": {
+      "total": 10,
+      "pending": 1,
+      "called": 9,
+      "follow_up": 0
+    },
+    "calls_attempted": 0,
+    "calls_completed": 0,
+    "calls_failed": 0,
+    "calls_active": 0,
+    "calls_queued": 0,
+    "sales_insights_generated": 0,
+    "interested": 0,
+    "not_interested": 0,
+    "need_more_information": 0,
+    "ready_to_join": 0,
+    "callback_requested": 0,
+    "undecided": 0,
+    "follow_up_required": 0,
+    "completion_rate": 0.0,
+    "interest_rate": 0.0,
+    "follow_up_rate": 0.0,
+    "ready_to_join_rate": 0.0,
+    "callback_rate": 0.0,
+    "not_interested_rate": 0.0,
+    "total_call_duration_seconds": 0,
+    "total_call_duration_display": "0s",
+    "average_call_duration_seconds": 0,
+    "average_call_duration_display": "0s",
+    "priority_summary": {
+      "HOT": 0,
+      "HIGH": 0,
+      "MEDIUM": 0,
+      "LOW": 0
+    },
+    "most_asked_questions": [],
+    "original_questions": [],
+    "interested_courses": [],
+    "customer_types": [],
+    "education_summary": [],
+    "occupation_summary": [],
+    "follow_up_leads": [],
+    "call_details": []
+  },
+  "yesterday": {
+    "date": "2026-09-09",
+    "summary": {
+      "date": "2026-09-09",
+      "new_leads": 6,
+      "new_lead_status": {
+        "pending": 0,
+        "called": 6,
+        "follow_up": 0
+      },
+      "queue_snapshot": {
+        "total": 10,
+        "pending": 1,
+        "called": 9,
+        "follow_up": 0
+      },
+      "calls_attempted": 18,
+      "calls_completed": 18,
+      "calls_failed": 0,
+      "calls_active": 0,
+      "calls_queued": 0,
+      "sales_insights_generated": 0,
+      "interested": 0,
+      "not_interested": 0,
+      "need_more_information": 0,
+      "ready_to_join": 0,
+      "callback_requested": 0,
+      "undecided": 0,
+      "follow_up_required": 0,
+      "completion_rate": 100.0,
+      "interest_rate": 0.0,
+      "follow_up_rate": 0.0,
+      "ready_to_join_rate": 0.0,
+      "callback_rate": 0.0,
+      "not_interested_rate": 0.0,
+      "total_call_duration_seconds": 1713,
+      "total_call_duration_display": "28m 33s",
+      "average_call_duration_seconds": 95,
+      "average_call_duration_display": "1m 35s",
+      "priority_summary": {
+        "HOT": 0,
+        "HIGH": 0,
+        "MEDIUM": 0,
+        "LOW": 0
+      },
+      "most_asked_questions": [],
+      "original_questions": [],
+      "interested_courses": [],
+      "customer_types": [],
+      "education_summary": [],
+      "occupation_summary": [],
+      "follow_up_leads": [],
+      "call_details": []
+    }
+  },
+  "comparison_vs_yesterday": {
+    "new_leads": {
+      "current": 0,
+      "previous": 6,
+      "change_percent": -100.0,
+      "direction": "down",
+      "label": "-100.00%"
+    },
+    "calls_attempted": {
+      "current": 0,
+      "previous": 18,
+      "change_percent": -100.0,
+      "direction": "down",
+      "label": "-100.00%"
+    },
+    "calls_completed": {
+      "current": 0,
+      "previous": 18,
+      "change_percent": -100.0,
+      "direction": "down",
+      "label": "-100.00%"
+    },
+    "interested": {
+      "current": 0,
+      "previous": 0,
+      "change_percent": 0.0,
+      "direction": "same",
+      "label": "0%"
+    },
+    "follow_up_required": {
+      "current": 0,
+      "previous": 0,
+      "change_percent": 0.0,
+      "direction": "same",
+      "label": "0%"
+    },
+    "ready_to_join": {
+      "current": 0,
+      "previous": 0,
+      "change_percent": 0.0,
+      "direction": "same",
+      "label": "0%"
+    }
+  },
+  "previous_days_lead_comparison": [
+    {
+      "date": "2026-09-03",
+      "lead_count": 0,
+      "previous_day_change": null
+    },
+    {
+      "date": "2026-09-04",
+      "lead_count": 0,
+      "previous_day_change": {
+        "current": 0,
+        "previous": 0,
+        "change_percent": 0.0,
+        "direction": "same",
+        "label": "0%"
+      }
+    },
+    {
+      "date": "2026-09-05",
+      "lead_count": 0,
+      "previous_day_change": {
+        "current": 0,
+        "previous": 0,
+        "change_percent": 0.0,
+        "direction": "same",
+        "label": "0%"
+      }
+    },
+    {
+      "date": "2026-09-06",
+      "lead_count": 0,
+      "previous_day_change": {
+        "current": 0,
+        "previous": 0,
+        "change_percent": 0.0,
+        "direction": "same",
+        "label": "0%"
+      }
+    },
+    {
+      "date": "2026-09-07",
+      "lead_count": 0,
+      "previous_day_change": {
+        "current": 0,
+        "previous": 0,
+        "change_percent": 0.0,
+        "direction": "same",
+        "label": "0%"
+      }
+    },
+    {
+      "date": "2026-09-08",
+      "lead_count": 2,
+      "previous_day_change": {
+        "current": 2,
+        "previous": 0,
+        "change_percent": null,
+        "direction": "up",
+        "label": "NEW"
+      }
+    },
+    {
+      "date": "2026-09-09",
+      "lead_count": 6,
+      "previous_day_change": {
+        "current": 6,
+        "previous": 2,
+        "change_percent": 200.0,
+        "direction": "up",
+        "label": "+200.00%"
+      }
+    },
+    {
+      "date": "2026-09-10",
+      "lead_count": 0,
+      "previous_day_change": {
+        "current": 0,
+        "previous": 6,
+        "change_percent": -100.0,
+        "direction": "down",
+        "label": "-100.00%"
+      }
+    }
+  ],
+  "seven_day_average": {
+    "average_new_leads": 1.14,
+    "average_calls_attempted": 5.29,
+    "average_calls_completed": 3.29,
+    "average_interested": 0.0,
+    "average_follow_up_required": 0.0,
+    "average_ready_to_join": 0.0
+  },
+  "comparison_vs_7_day_average": {
+    "new_leads": {
+      "current": 0,
+      "previous": 1.14,
+      "change_percent": -100.0,
+      "direction": "down",
+      "label": "-100.00%"
+    },
+    "calls_attempted": {
+      "current": 0,
+      "previous": 5.29,
+      "change_percent": -100.0,
+      "direction": "down",
+      "label": "-100.00%"
+    },
+    "calls_completed": {
+      "current": 0,
+      "previous": 3.29,
+      "change_percent": -100.0,
+      "direction": "down",
+      "label": "-100.00%"
+    },
+    "interested": {
+      "current": 0,
+      "previous": 0.0,
+      "change_percent": 0.0,
+      "direction": "same",
+      "label": "0%"
+    }
+  }
+}

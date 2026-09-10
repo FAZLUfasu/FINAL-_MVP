@@ -10,6 +10,8 @@ from unfold.admin import ModelAdmin, StackedInline
 
 from openpyxl import load_workbook
 
+from .views import telicall_reports_dashboard
+
 from .models import (
     CallQueueItem,
     CallSession,
@@ -95,9 +97,21 @@ class CallQueueItemAdmin(ModelAdmin):
                 self.admin_site.admin_view(self.import_excel_view),
                 name="calls_callqueueitem_import_excel",
             ),
+            path(
+                "reports/",
+                self.admin_site.admin_view(telicall_reports_dashboard),
+                name="calls_callqueueitem_reports",
+            ),
         ]
 
         return custom_urls + default_urls
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        extra_context["import_excel_url"] = reverse(
+            "admin:calls_callqueueitem_import_excel"
+        )
+        return super().changelist_view(request, extra_context=extra_context)
 
     # --------------------------------------------------------
     # EXCEL HELPERS

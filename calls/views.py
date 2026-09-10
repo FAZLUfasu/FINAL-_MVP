@@ -4,21 +4,28 @@ import json
 import os
 import re
 import time
-from datetime import timedelta
-
+from datetime import datetime, timedelta
 from asgiref.sync import async_to_sync
-
+from django.contrib import admin
+from django.contrib.admin.views.decorators import staff_member_required
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
-
+from django.views.decorators.http import require_http_methods
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-
-from .models import CallQueueItem, CompanyScript
+from .models import CallQueueItem, CompanyScript, SystemSettings
 from .conversation_engine import generate_conversation_turn
+from .report import (
+    generate_daily_report,
+    generate_monthly_report,
+    get_follow_up_report,
+    get_most_asked_questions,
+    get_previous_days_report,
+    get_report_payload,
+)
 
 
 @api_view(['GET'])
@@ -158,51 +165,6 @@ def update_call_status(request, pk):
         status=status.HTTP_200_OK
     )
 
-
-@api_view(['GET'])
-def call_reports_analytics(request):
-    time_frame = request.GET.get('range', 'daily').lower()
-    now = timezone.now()
-
-    if time_frame == 'daily':
-        start_date = now - timedelta(days=1)
-    elif time_frame == 'weekly':
-        start_date = now - timedelta(weeks=1)
-    else:
-        start_date = now - timedelta(days=30)
-
-    queryset = CallQueueItem.objects.filter(
-        updated_at__gte=start_date
-    )
-
-    total_called = queryset.filter(status='CALLED').count()
-    total_pending = queryset.filter(status='PENDING').count()
-    total_followup = queryset.filter(status='FOLLOW_UP').count()
-
-    questions = list(
-        queryset
-        .exclude(top_question__isnull=True)
-        .exclude(top_question='')
-        .values_list('top_question', flat=True)
-    )
-
-    top_questions = list(set(questions))[:5]
-
-    return Response({
-        'range': time_frame,
-        'total_called': total_called,
-        'total_pending': total_pending,
-        'total_followup': total_followup,
-        'most_asked_questions': (
-            top_questions
-            if top_questions
-            else [
-                "Is product pricing flexible?",
-                "Can I schedule a live demo?",
-                "What are the core features?"
-            ]
-        )
-    }, status=status.HTTP_200_OK)
 
 
 @api_view(['GET'])
@@ -586,13 +548,6 @@ def ai_test_respond(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-import json
-
-from django.http import JsonResponse
-from django.views.decorators.http import require_http_methods
-
-from .models import SystemSettings
-
 
 @require_http_methods(["GET", "PUT", "POST"])
 def system_settings_view(request):
@@ -653,3 +608,115 @@ def system_settings_view(request):
             },
             status=400,
         )
+
+
+@api_view(["GET"])
+def call_reports_analytics(request):
+    """
+    Telicall reporting API.
+
+    Examples:
+        /api/reports/?range=daily
+        /api/reports/?range=daily&date=2026-09-10
+        /api/reports/?range=weekly
+        /api/reports/?range=monthly
+        /api/reports/?range=monthly&year=2026&month=9
+        /api/reports/?range=previous&days=30
+        /api/reports/?range=followup
+        /api/reports/?range=questions&days=30
+    """
+    report_range = str(request.GET.get("range", "daily") or "daily").strip().lower()
+
+    report_date = None
+    raw_date = str(request.GET.get("date", "") or "").strip()
+    if raw_date:
+        try:
+            report_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"error": "Invalid date. Use YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    year = request.GET.get("year")
+    month = request.GET.get("month")
+    days = request.GET.get("days", 30)
+
+    try:
+        year = int(year) if year else None
+        month = int(month) if month else None
+        days = max(1, min(int(days), 365))
+
+        payload = get_report_payload(
+            report_range,
+            report_date=report_date,
+            year=year,
+            month=month,
+            days=days,
+        )
+
+        return Response(payload, status=status.HTTP_200_OK)
+
+    except ValueError as exc:
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    except Exception as exc:
+        return Response(
+            {
+                "error": "Unable to generate Telicall report.",
+                "detail": f"{type(exc).__name__}: {exc}",
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@staff_member_required
+def telicall_reports_dashboard(request):
+    """Staff-only visual Telicall reporting dashboard."""
+    today = timezone.localdate()
+
+    try:
+        selected_year = int(request.GET.get("year", today.year))
+        selected_month = int(request.GET.get("month", today.month))
+    except (TypeError, ValueError):
+        selected_year = today.year
+        selected_month = today.month
+
+    if selected_month < 1 or selected_month > 12:
+        selected_month = today.month
+
+    daily = generate_daily_report(today)
+    monthly = generate_monthly_report(selected_year, selected_month)
+    previous_days = get_previous_days_report(14)
+    followups = get_follow_up_report(100)
+    questions = get_most_asked_questions(days=30, limit=15)
+
+    # Get the full Django / Unfold admin context
+    admin_context = admin.site.each_context(request)
+
+    context = {
+        **admin_context,
+
+        "title": "Telicall Reports",
+        "today": today,
+        "daily": daily,
+        "monthly": monthly,
+        "previous_days": previous_days,
+        "followups": followups,
+        "questions": questions,
+        "selected_year": selected_year,
+        "selected_month": selected_month,
+        "has_permission": True,
+
+        # Helps Unfold associate this page with the Calls app/model
+        "opts": CallQueueItem._meta,
+    }
+
+    return render(
+        request,
+        "admin/calls/telicall_reports_dashboard.html",
+        context,
+    )

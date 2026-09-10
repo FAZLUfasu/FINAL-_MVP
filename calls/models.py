@@ -467,3 +467,149 @@ class SystemSettings(models.Model):
 
     def __str__(self):
         return "Telicall System Settings"
+class DailyReport(models.Model):
+    report_date = models.DateField(unique=True)
+
+    total_leads = models.PositiveIntegerField(default=0)
+    calls_attempted = models.PositiveIntegerField(default=0)
+    calls_completed = models.PositiveIntegerField(default=0)
+
+    pending_count = models.PositiveIntegerField(default=0)
+    called_count = models.PositiveIntegerField(default=0)
+    follow_up_count = models.PositiveIntegerField(default=0)
+
+    interested_count = models.PositiveIntegerField(default=0)
+    not_interested_count = models.PositiveIntegerField(default=0)
+    need_more_information_count = models.PositiveIntegerField(default=0)
+    ready_to_join_count = models.PositiveIntegerField(default=0)
+    callback_requested_count = models.PositiveIntegerField(default=0)
+
+    completion_rate = models.FloatField(default=0)
+    interest_rate = models.FloatField(default=0)
+    follow_up_rate = models.FloatField(default=0)
+    ready_to_join_rate = models.FloatField(default=0)
+
+    total_call_duration_seconds = models.PositiveIntegerField(default=0)
+    average_call_duration_seconds = models.PositiveIntegerField(default=0)
+
+    previous_day_comparison = models.JSONField(
+        default=dict,
+        blank=True,
+    )
+
+    seven_day_comparison = models.JSONField(
+        default=dict,
+        blank=True,
+    )
+
+    most_asked_questions = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    interested_courses = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    customer_types = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    education_summary = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    priority_summary = models.JSONField(
+        default=dict,
+        blank=True,
+    )
+
+    follow_up_leads = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    generated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-report_date"]
+
+    def __str__(self):
+        return f"Daily Report - {self.report_date}"
+class MonthlyReport(models.Model):
+    year = models.PositiveIntegerField()
+    month = models.PositiveIntegerField()
+
+    total_leads = models.PositiveIntegerField(default=0)
+    calls_attempted = models.PositiveIntegerField(default=0)
+    calls_completed = models.PositiveIntegerField(default=0)
+
+    pending_count = models.PositiveIntegerField(default=0)
+    called_count = models.PositiveIntegerField(default=0)
+    follow_up_count = models.PositiveIntegerField(default=0)
+
+    interested_count = models.PositiveIntegerField(default=0)
+    not_interested_count = models.PositiveIntegerField(default=0)
+    need_more_information_count = models.PositiveIntegerField(default=0)
+    ready_to_join_count = models.PositiveIntegerField(default=0)
+    callback_requested_count = models.PositiveIntegerField(default=0)
+
+    completion_rate = models.FloatField(default=0)
+    interest_rate = models.FloatField(default=0)
+    follow_up_rate = models.FloatField(default=0)
+    ready_to_join_rate = models.FloatField(default=0)
+
+    total_call_duration_seconds = models.PositiveIntegerField(default=0)
+    average_call_duration_seconds = models.PositiveIntegerField(default=0)
+
+    previous_month_comparison = models.JSONField(
+        default=dict,
+        blank=True,
+    )
+
+    daily_performance = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    most_asked_questions = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    interested_courses = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    customer_types = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    education_summary = models.JSONField(
+        default=list,
+        blank=True,
+    )
+
+    system_performance = models.JSONField(
+        default=dict,
+        blank=True,
+    )
+
+    generated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["year", "month"],
+                name="unique_monthly_report",
+            )
+        ]
+        ordering = ["-year", "-month"]
+
+    def __str__(self):
+        return f"Monthly Report - {self.month}/{self.year}"

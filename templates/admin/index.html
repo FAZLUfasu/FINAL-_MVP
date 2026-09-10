@@ -1,0 +1,166 @@
+{% extends 'admin/base.html' %}
+
+{% load i18n %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+    {% include "unfold/helpers/site_branding.html" %}
+{% endblock %}
+
+{% block content %}
+    <style>
+        .telicall-report-summary {
+            margin-top: 24px;
+        }
+
+        .telicall-report-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+
+        .telicall-report-title {
+            margin: 0;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .telicall-report-date {
+            margin-top: 4px;
+            font-size: 12px;
+            opacity: .65;
+        }
+
+        .telicall-report-link {
+            display: inline-flex;
+            align-items: center;
+            padding: 8px 13px;
+            border-radius: 7px;
+            background: #2563eb;
+            color: #fff !important;
+            text-decoration: none !important;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .telicall-report-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .telicall-report-card {
+            border: 1px solid rgba(128, 128, 128, .22);
+            border-radius: 9px;
+            padding: 14px;
+        }
+
+        .telicall-report-label {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .035em;
+            opacity: .62;
+            margin-bottom: 7px;
+        }
+
+        .telicall-report-value {
+            font-size: 24px;
+            line-height: 1.1;
+            font-weight: 750;
+        }
+
+        .telicall-report-small {
+            margin-top: 5px;
+            font-size: 11px;
+            opacity: .62;
+        }
+
+        @media (max-width: 900px) {
+            .telicall-report-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 520px) {
+            .telicall-report-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+
+    <div class="flex flex-col lg:flex-row lg:gap-8">
+        <div class="grow min-w-0">
+            {% include "unfold/helpers/app_list_default.html" %}
+
+            <section class="telicall-report-summary">
+                <div class="telicall-report-header">
+                    <div>
+                        <h2 class="telicall-report-title">Report Summary</h2>
+                        <div class="telicall-report-date">
+                            Today{% if telicall_today %} · {{ telicall_today|date:"d M Y" }}{% endif %}
+                        </div>
+                    </div>
+
+                    {% if telicall_reports_url %}
+                        <a href="{{ telicall_reports_url }}" class="telicall-report-link">
+                            View Full Reports
+                        </a>
+                    {% endif %}
+                </div>
+
+                <div class="telicall-report-grid">
+                    <div class="telicall-report-card">
+                        <div class="telicall-report-label">New Leads</div>
+                        <div class="telicall-report-value">{{ telicall_summary.new_leads|default:0 }}</div>
+                    </div>
+
+                    <div class="telicall-report-card">
+                        <div class="telicall-report-label">Calls Attempted</div>
+                        <div class="telicall-report-value">{{ telicall_summary.calls_attempted|default:0 }}</div>
+                    </div>
+
+                    <div class="telicall-report-card">
+                        <div class="telicall-report-label">Completed</div>
+                        <div class="telicall-report-value">{{ telicall_summary.calls_completed|default:0 }}</div>
+                        <div class="telicall-report-small">{{ telicall_summary.completion_rate|default:0 }}% completion</div>
+                    </div>
+
+                    <div class="telicall-report-card">
+                        <div class="telicall-report-label">Interested</div>
+                        <div class="telicall-report-value">{{ telicall_summary.interested|default:0 }}</div>
+                        <div class="telicall-report-small">{{ telicall_summary.interest_rate|default:0 }}% interest rate</div>
+                    </div>
+
+                    <div class="telicall-report-card">
+                        <div class="telicall-report-label">Follow-ups</div>
+                        <div class="telicall-report-value">{{ telicall_summary.follow_up_required|default:0 }}</div>
+                    </div>
+
+                    <div class="telicall-report-card">
+                        <div class="telicall-report-label">Failed</div>
+                        <div class="telicall-report-value">{{ telicall_summary.calls_failed|default:0 }}</div>
+                    </div>
+
+                    <div class="telicall-report-card">
+                        <div class="telicall-report-label">Not Interested</div>
+                        <div class="telicall-report-value">{{ telicall_summary.not_interested|default:0 }}</div>
+                    </div>
+
+                    <div class="telicall-report-card">
+                        <div class="telicall-report-label">Avg. Duration</div>
+                        <div class="telicall-report-value" style="font-size:19px;">
+                            {{ telicall_summary.average_call_duration_display|default:"0s" }}
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        {% include "unfold/helpers/history.html" %}
+    </div>
+{% endblock %}

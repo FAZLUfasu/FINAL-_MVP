@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 import os
 from pathlib import Path
+from django.urls import reverse_lazy
+from django.utils.translation import gettext_lazy as _
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -147,3 +149,83 @@ TIME_ZONE = 'Asia/Kolkata'
 
 # 2. Keep USE_TZ as True so Django stores in UTC but displays in IST
 USE_TZ = True
+
+# ============================================================
+# UNFOLD ADMIN UI
+# ============================================================
+
+UNFOLD = {
+    "SITE_TITLE": "Telicall Admin",
+    "SITE_HEADER": "Telicall",
+    "SITE_SUBHEADER": "AI Calling Management System",
+    "DASHBOARD_CALLBACK": "calls.dashboard.dashboard_callback",
+
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": _("Call Management"),
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("Call Queue"),
+                        "icon": "call",
+                        "link": reverse_lazy("admin:calls_callqueueitem_changelist"),
+                    },
+                    {
+                        "title": _("Call Sessions"),
+                        "icon": "history",
+                        "link": reverse_lazy("admin:calls_callsession_changelist"),
+                    },
+                    {
+                        "title": _("Contacts"),
+                        "icon": "contacts",
+                        "link": reverse_lazy("admin:calls_contact_changelist"),
+                    },
+                    {
+                        "title": _("Sales Insights"),
+                        "icon": "psychology",
+                        "link": reverse_lazy("admin:calls_salesinsight_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": _("Reports"),
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("Telicall Reports"),
+                        "icon": "analytics",
+                        "link": reverse_lazy("admin:calls_callqueueitem_reports"),
+                    },
+                ],
+            },
+            {
+                "title": _("AI Configuration"),
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("Company Scripts"),
+                        "icon": "description",
+                        "link": reverse_lazy("admin:calls_companyscript_changelist"),
+                    },
+                    {
+                        "title": _("Custom Voices"),
+                        "icon": "record_voice_over",
+                        "link": reverse_lazy("admin:calls_customvoice_changelist"),
+                    },
+                    {
+                        "title": _("System Settings"),
+                        "icon": "settings",
+                        "link": reverse_lazy("admin:calls_systemsettings_changelist"),
+                    },
+                ],
+            },
+        ],
+    },
+}
+

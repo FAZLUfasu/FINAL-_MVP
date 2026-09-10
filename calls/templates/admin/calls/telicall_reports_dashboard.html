@@ -1,0 +1,180 @@
+{% extends 'admin/base.html' %}
+
+{% block title %}Telicall Reports | {{ site_title|default:'Telicall Admin' }}{% endblock %}
+{% load i18n %}
+
+{% block branding %}
+    {% include "unfold/helpers/site_branding.html" %}
+{% endblock %}
+
+
+{% block content %}
+<style>
+    .tr-wrap { max-width: 1500px; margin: 0 auto; }
+    .tr-header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:22px; }
+    .tr-title { font-size:28px; font-weight:800; margin:0; }
+    .tr-muted { color:#6b7280; font-size:13px; }
+    .tr-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:14px; margin-bottom:22px; }
+    .tr-card { border:1px solid #e5e7eb; border-radius:14px; padding:16px; background:var(--body-bg,#fff); }
+    .tr-value { font-size:28px; font-weight:800; margin-top:8px; }
+    .tr-change { font-size:12px; font-weight:700; margin-top:5px; }
+    .tr-up { color:#15803d; } .tr-down { color:#b91c1c; } .tr-same { color:#6b7280; }
+    .tr-section { border:1px solid #e5e7eb; border-radius:14px; padding:18px; margin-bottom:20px; background:var(--body-bg,#fff); overflow:auto; }
+    .tr-section h2 { margin:0 0 14px; font-size:19px; }
+    .tr-table { width:100%; border-collapse:collapse; min-width:760px; }
+    .tr-table th,.tr-table td { border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; font-size:13px; }
+    .tr-table th { font-weight:700; background:rgba(127,127,127,.06); }
+    .tr-pill { display:inline-block; padding:4px 9px; border-radius:999px; font-size:11px; font-weight:700; background:#eef2ff; }
+    .tr-two { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+    .tr-form { display:flex; gap:8px; align-items:center; }
+    .tr-form input { width:90px; padding:7px; }
+    .tr-form button { padding:8px 12px; cursor:pointer; }
+    @media(max-width:1100px){ .tr-grid{grid-template-columns:repeat(2,1fr)} .tr-two{grid-template-columns:1fr} }
+    @media(max-width:600px){ .tr-grid{grid-template-columns:1fr} .tr-header{align-items:flex-start;flex-direction:column} }
+</style>
+
+<div class="tr-wrap">
+    <div class="tr-header">
+        <div>
+            <h1 class="tr-title">Telicall Reports</h1>
+            <div class="tr-muted">Live management report for {{ today }}</div>
+        </div>
+        <form class="tr-form" method="get">
+            <input type="number" name="year" value="{{ selected_year }}" min="2020" max="2100">
+            <input type="number" name="month" value="{{ selected_month }}" min="1" max="12">
+            <button type="submit">Open Month</button>
+        </form>
+    </div>
+
+    <div class="tr-grid">
+        <div class="tr-card">
+            <div class="tr-muted">Leads Today</div>
+            <div class="tr-value">{{ daily.leads.imported_in_period }}</div>
+            {% with c=daily.previous_day_comparison.lead_count %}
+            <div class="tr-change tr-{{ c.direction }}">{{ c.label }} vs yesterday</div>
+            {% endwith %}
+        </div>
+        <div class="tr-card">
+            <div class="tr-muted">Calls Attempted</div>
+            <div class="tr-value">{{ daily.calls.attempted }}</div>
+            {% with c=daily.previous_day_comparison.calls_attempted %}
+            <div class="tr-change tr-{{ c.direction }}">{{ c.label }} vs yesterday</div>
+            {% endwith %}
+        </div>
+        <div class="tr-card">
+            <div class="tr-muted">Completed</div>
+            <div class="tr-value">{{ daily.calls.completed }}</div>
+            {% with c=daily.previous_day_comparison.calls_completed %}
+            <div class="tr-change tr-{{ c.direction }}">{{ c.label }} vs yesterday</div>
+            {% endwith %}
+        </div>
+        <div class="tr-card">
+            <div class="tr-muted">Follow-up Required</div>
+            <div class="tr-value">{{ daily.sales.follow_up_required }}</div>
+            {% with c=daily.previous_day_comparison.follow_up_required %}
+            <div class="tr-change tr-{{ c.direction }}">{{ c.label }} vs yesterday</div>
+            {% endwith %}
+        </div>
+        <div class="tr-card">
+            <div class="tr-muted">Ready to Join</div>
+            <div class="tr-value">{{ daily.sales.ready_to_join }}</div>
+            <div class="tr-change tr-same">{{ daily.sales.ready_to_join_rate }}% of completed</div>
+        </div>
+    </div>
+
+    <div class="tr-two">
+        <div class="tr-section">
+            <h2>Today — Sales Performance</h2>
+            <table class="tr-table">
+                <tr><th>Metric</th><th>Value</th></tr>
+                <tr><td>Completion Rate</td><td>{{ daily.calls.completion_rate }}%</td></tr>
+                <tr><td>Interested</td><td>{{ daily.sales.interested }}</td></tr>
+                <tr><td>Needs More Information</td><td>{{ daily.sales.need_more_information }}</td></tr>
+                <tr><td>Callback Requested</td><td>{{ daily.sales.callback_requested }}</td></tr>
+                <tr><td>Not Interested</td><td>{{ daily.sales.not_interested }}</td></tr>
+                <tr><td>Average Call Duration</td><td>{{ daily.calls.average_duration_seconds }} sec</td></tr>
+            </table>
+        </div>
+
+        <div class="tr-section">
+            <h2>Current Queue</h2>
+            <table class="tr-table">
+                <tr><th>Status</th><th>Count</th></tr>
+                <tr><td>Pending</td><td>{{ daily.leads.current_pending }}</td></tr>
+                <tr><td>Called</td><td>{{ daily.leads.current_called }}</td></tr>
+                <tr><td>Follow Up</td><td>{{ daily.leads.current_follow_up }}</td></tr>
+                <tr><td>Hot Priority</td><td>{{ daily.lead_priorities.HOT }}</td></tr>
+                <tr><td>High Priority</td><td>{{ daily.lead_priorities.HIGH }}</td></tr>
+            </table>
+        </div>
+    </div>
+
+    <div class="tr-section">
+        <h2>Previous Days Performance</h2>
+        <table class="tr-table">
+            <thead><tr><th>Date</th><th>Leads</th><th>Attempts</th><th>Completed</th><th>Completion %</th><th>Interested</th><th>Follow Up</th><th>Ready</th></tr></thead>
+            <tbody>
+            {% for row in previous_days.items %}
+                <tr>
+                    <td>{{ row.date }}</td><td>{{ row.leads }}</td><td>{{ row.calls_attempted }}</td><td>{{ row.calls_completed }}</td>
+                    <td>{{ row.completion_rate }}%</td><td>{{ row.interested }}</td><td>{{ row.follow_up }}</td><td>{{ row.ready_to_join }}</td>
+                </tr>
+            {% empty %}<tr><td colspan="8">No report data.</td></tr>{% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="tr-section">
+        <h2>{{ monthly.month_name }} {{ monthly.year }} — Monthly Performance</h2>
+        <table class="tr-table">
+            <thead><tr><th>Metric</th><th>This Month</th><th>Previous Month</th><th>Change</th></tr></thead>
+            <tbody>
+                <tr><td>Leads</td><td>{{ monthly.leads.imported_in_period }}</td><td>{{ monthly.previous_month_comparison.lead_count.previous }}</td><td>{{ monthly.previous_month_comparison.lead_count.label }}</td></tr>
+                <tr><td>Calls Attempted</td><td>{{ monthly.calls.attempted }}</td><td>{{ monthly.previous_month_comparison.calls_attempted.previous }}</td><td>{{ monthly.previous_month_comparison.calls_attempted.label }}</td></tr>
+                <tr><td>Completed</td><td>{{ monthly.calls.completed }}</td><td>{{ monthly.previous_month_comparison.calls_completed.previous }}</td><td>{{ monthly.previous_month_comparison.calls_completed.label }}</td></tr>
+                <tr><td>Follow Up</td><td>{{ monthly.sales.follow_up_required }}</td><td>{{ monthly.previous_month_comparison.follow_up_required.previous }}</td><td>{{ monthly.previous_month_comparison.follow_up_required.label }}</td></tr>
+                <tr><td>Ready to Join</td><td>{{ monthly.sales.ready_to_join }}</td><td>{{ monthly.previous_month_comparison.ready_to_join.previous }}</td><td>{{ monthly.previous_month_comparison.ready_to_join.label }}</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="tr-two">
+        <div class="tr-section">
+            <h2>Most Asked Questions — Last 30 Days</h2>
+            <table class="tr-table">
+                <thead><tr><th>Question Category</th><th>Calls</th></tr></thead>
+                <tbody>
+                {% for row in questions.questions %}<tr><td>{{ row.label }}</td><td>{{ row.count }}</td></tr>
+                {% empty %}<tr><td colspan="2">No customer questions analyzed yet.</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="tr-section">
+            <h2>Interested Courses — {{ monthly.month_name }}</h2>
+            <table class="tr-table">
+                <thead><tr><th>Course / Interest</th><th>Leads</th></tr></thead>
+                <tbody>
+                {% for row in monthly.interested_courses %}<tr><td>{{ row.course }}</td><td>{{ row.count }}</td></tr>
+                {% empty %}<tr><td colspan="2">No course-interest data yet.</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="tr-section">
+        <h2>Follow-up Leads</h2>
+        <table class="tr-table">
+            <thead><tr><th>Name</th><th>Phone</th><th>Education</th><th>Occupation</th><th>Interested Course</th><th>Priority</th><th>Callback</th><th>Summary</th></tr></thead>
+            <tbody>
+            {% for row in followups.items %}
+                <tr>
+                    <td>{{ row.name|default:"-" }}</td><td>{{ row.phone_number|default:"-" }}</td><td>{{ row.education|default:"-" }}</td>
+                    <td>{{ row.occupation|default:"-" }}</td><td>{{ row.interested_course|default:"-" }}</td>
+                    <td><span class="tr-pill">{{ row.lead_priority }}</span></td><td>{{ row.callback_preference|default:"-" }}</td><td>{{ row.customer_summary|default:"-" }}</td>
+                </tr>
+            {% empty %}<tr><td colspan="8">No follow-up leads.</td></tr>{% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
