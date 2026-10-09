@@ -9,3 +9,8 @@ __pycache__/
 huggingface/
 .vscode/
 .idea/
+.env
+
+*.bak
+backups/
+installed-packages*.txt

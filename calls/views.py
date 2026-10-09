@@ -212,10 +212,6 @@ def home(request):
 # INTERNAL AI TEST CONSOLE
 # ---------------------------------------------------------------------------
 
-AI_TEST_MODEL = os.getenv(
-    "TELICALL_TEST_LLM_MODEL",
-    "llama3.2",
-).strip()
 
 
 def _compact_text(value, limit=500):
@@ -443,7 +439,6 @@ def ai_test_respond(request):
             customer_profile=customer_profile,
             stage=stage_value,
             user_text=message,
-            model=AI_TEST_MODEL,
         )
 
         elapsed = time.perf_counter() - start_time
@@ -532,7 +527,7 @@ def ai_test_respond(request):
                     elapsed,
                     2,
                 ),
-                "model": AI_TEST_MODEL,
+                "model": "Gemini API (configured model failover)",
             },
             status=status.HTTP_200_OK,
         )

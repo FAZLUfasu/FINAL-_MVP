@@ -1,7 +1,9 @@
 
 import asyncio
+import base64
 import io
 import json
+import html
 import os
 import re
 import subprocess
@@ -25,9 +27,8 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from django.core.files.base import ContentFile
 from faster_whisper import WhisperModel
 import numpy as np
-import ollama
 from pydub import AudioSegment
-from calls.conversation_engine import generate_conversation_turn
+from calls.conversation_engine import generate_conversation_turn, generate_gemini_json
 
 
 # Keep the same FFmpeg paths that are already working in the current backend.
@@ -47,15 +48,14 @@ from calls.models import CallSession, CompanyScript, Contact, CustomVoice, Sales
 
 print("🧠 Loading Whisper Speech Engine inside Django...")
 
-# Accuracy-first STT configuration for cellular speech.
+# Multilingual STT configuration for cellular speech.
+# IMPORTANT: use a multilingual Whisper model (no `.en` suffix).
 # Override without editing code, for example:
-#   $env:TELICALL_WHISPER_MODEL="medium.en"
-# Low-latency default for CPU telephony. "base.en" is much faster than
-# small.en while normally being more reliable than tiny for English calls.
-# You can switch to "small.en" later when accuracy matters more than latency.
+#   $env:TELICALL_WHISPER_MODEL="small"
+# `base` is the low-latency multilingual default for CPU telephony.
 WHISPER_MODEL_NAME = os.getenv(
     "TELICALL_WHISPER_MODEL",
-    "base.en",
+    "small",
 ).strip()
 
 whisper_model = WhisperModel(
@@ -68,6 +68,22 @@ whisper_model = WhisperModel(
 print(
     f"✅ Whisper Bound to Django App! model={WHISPER_MODEL_NAME}"
 )
+
+# Languages officially enabled for Telicall Step 1.
+SUPPORTED_LANGUAGES = {
+    "en": "English",
+    "ml": "Malayalam",
+    "ta": "Tamil",
+    "hi": "Hindi",
+    "ar": "Arabic",
+}
+
+DEFAULT_LANGUAGE_CODE = "en"
+
+# Only reliable automatic Whisper detections can influence language learning.
+MIN_LANGUAGE_EVIDENCE_CONFIDENCE = 0.60
+MIN_LANGUAGE_LOCK_SHARE = 0.60
+MIN_LANGUAGE_LOCK_WINNER_TURNS = 2
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -90,6 +106,28 @@ try:
 except ValueError:
     SAPI_VOLUME = 100
 
+# Azure Neural TTS is the multilingual speech path.
+# Credentials are intentionally read from environment variables rather than
+# stored in source code or the database.
+AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY", "").strip()
+AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "").strip()
+
+AZURE_VOICE_BY_LANGUAGE = {
+    "en": "en-IN-NeerjaNeural",
+    "ml": "ml-IN-SobhanaNeural",
+    "ta": "ta-IN-PallaviNeural",
+    "hi": "hi-IN-AnanyaNeural",
+    "ar": "ar-SA-ZariyahNeural",
+}
+
+AZURE_LOCALE_BY_LANGUAGE = {
+    "en": "en-IN",
+    "ml": "ml-IN",
+    "ta": "ta-IN",
+    "hi": "hi-IN",
+    "ar": "ar-SA",
+}
+
 # 16 kHz, mono, PCM16 = 32,000 bytes/sec
 PCM_SAMPLE_RATE = 16000
 PCM_BYTES_PER_SECOND = PCM_SAMPLE_RATE * 2
@@ -98,34 +136,6 @@ PCM_BYTES_PER_SECOND = PCM_SAMPLE_RATE * 2
 AI_STREAM_CHUNK_BYTES = 16000  # ~0.5 s at 16 kHz PCM16 mono
 
 
-def initialize_llama_engine():
-    print("🦙 Checking Llama Engine Status...")
-    try:
-        import requests
-
-        res = requests.get("http://127.0.0.1:11434/api/tags", timeout=1.5)
-        if res.status_code == 200:
-            print("✅ Llama Engine Online & Bound to Pipeline!")
-            return
-    except Exception:
-        print("🚀 Llama Engine not detected. Auto-launching background process...")
-
-    try:
-        subprocess.Popen(
-            ["ollama", "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=(
-                subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-            ),
-        )
-        time.sleep(1.5)
-        print("✅ Llama Engine launch requested.")
-    except Exception as e:
-        print(f"❌ Error auto-starting Llama: {e}")
-
-
-initialize_llama_engine()
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +399,126 @@ finally {
             pass
 
 
+async def generate_azure_pcm_bytes(
+    text: str,
+    language_code: str = DEFAULT_LANGUAGE_CODE,
+    voice_name: str = "",
+) -> bytes:
+    """
+    Generate raw 16kHz / mono / PCM16 using Azure Neural TTS REST API.
+
+    This intentionally uses the REST endpoint rather than the Azure Speech SDK,
+    so the existing project only needs `requests`, which it already uses.
+    """
+    cleaned = _sanitize_tts_text(text)
+    if not cleaned:
+        return b""
+
+    language_code = str(
+        language_code or DEFAULT_LANGUAGE_CODE
+    ).strip().lower()
+
+    if language_code not in SUPPORTED_LANGUAGES:
+        language_code = DEFAULT_LANGUAGE_CODE
+
+    if not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
+        print(
+            "⚠️ [AZURE TTS NOT CONFIGURED] "
+            "Set AZURE_SPEECH_KEY and AZURE_SPEECH_REGION. "
+            "Using SAPI fallback."
+        )
+        return b""
+
+    selected_voice = (
+        str(voice_name or "").strip()
+        or AZURE_VOICE_BY_LANGUAGE.get(
+            language_code,
+            AZURE_VOICE_BY_LANGUAGE[DEFAULT_LANGUAGE_CODE],
+        )
+    )
+
+    locale = AZURE_LOCALE_BY_LANGUAGE.get(
+        language_code,
+        AZURE_LOCALE_BY_LANGUAGE[DEFAULT_LANGUAGE_CODE],
+    )
+
+    escaped_text = html.escape(cleaned, quote=False)
+
+    ssml = (
+        f"<speak version='1.0' xml:lang='{locale}'>"
+        f"<voice name='{selected_voice}'>"
+        f"{escaped_text}"
+        f"</voice>"
+        f"</speak>"
+    )
+
+    endpoint = (
+        f"https://{AZURE_SPEECH_REGION}."
+        "tts.speech.microsoft.com/cognitiveservices/v1"
+    )
+
+    headers = {
+        "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
+        "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "raw-16khz-16bit-mono-pcm",
+        "User-Agent": "TelicallVoiceAI",
+    }
+
+    def _request_sync():
+        import requests
+        return requests.post(
+            endpoint,
+            headers=headers,
+            data=ssml.encode("utf-8"),
+            timeout=15,
+        )
+
+    try:
+        started = time.perf_counter()
+        response = await asyncio.to_thread(_request_sync)
+
+        if response.status_code != 200:
+            print(
+                f"❌ [AZURE TTS ERROR] "
+                f"status={response.status_code} | "
+                f"body={response.text[:300]!r}"
+            )
+            return b""
+
+        pcm = bytes(response.content or b"")
+        if len(pcm) % 2:
+            pcm = pcm[:-1]
+
+        elapsed = time.perf_counter() - started
+        audio_seconds = (
+            len(pcm) / PCM_BYTES_PER_SECOND
+            if pcm
+            else 0.0
+        )
+
+        print(
+            f"⚡ [AZURE TTS READY] "
+            f"language={language_code} | "
+            f"voice={selected_voice} | "
+            f"pcm={len(pcm)} | "
+            f"audio={audio_seconds:.2f}s | "
+            f"time={elapsed:.2f}s"
+        )
+
+        return pcm
+
+    except asyncio.CancelledError:
+        print("🛑 [AZURE TTS REQUEST CANCELLED]")
+        raise
+
+    except Exception as e:
+        print(
+            f"❌ [AZURE TTS EXCEPTION] "
+            f"{type(e).__name__}: {e}"
+        )
+        return b""
+
+
 async def generate_custom_voice_pcm_bytes(text: str, settings: dict) -> bytes:
     """Custom voice integration point. Safely uses SAPI until a cloning engine is connected."""
     name = str(settings.get("custom_voice_name", "") or "").strip()
@@ -405,27 +535,254 @@ async def generate_custom_voice_pcm_bytes(text: str, settings: dict) -> bytes:
     )
 
 
-async def generate_voice_pcm_bytes(text: str, voice_settings: Optional[dict] = None) -> bytes:
-    settings = voice_settings or {}
-    engine = str(settings.get("engine", TTS_ENGINE) or "sapi").strip().lower()
-    voice_name = str(settings.get("voice_name", SAPI_VOICE) or "").strip()
+async def generate_gemini_pcm_bytes(
+    text: str,
+    language_code: str = DEFAULT_LANGUAGE_CODE,
+    voice_name: str = "",
+) -> bytes:
+    """Generate mono PCM16 at the call pipeline's 16 kHz sample rate."""
+    cleaned = _sanitize_tts_text(text)
+    if not cleaned:
+        return b""
+
+    api_key = (
+        os.getenv("GEMINI_API_KEY", "").strip()
+        or os.getenv("GOOGLE_API_KEY", "").strip()
+    )
+    if not api_key:
+        print("[GEMINI TTS ERROR] GEMINI_API_KEY/GOOGLE_API_KEY is not configured.")
+        return b""
+
+    language_code = str(language_code or DEFAULT_LANGUAGE_CODE).strip().lower()
+    language_name = SUPPORTED_LANGUAGES.get(
+        language_code, SUPPORTED_LANGUAGES[DEFAULT_LANGUAGE_CODE]
+    )
+    model = os.getenv(
+        "BRAINEX_GEMINI_TTS_MODEL", "gemini-3.8-flash-tts"
+    ).strip()
+    voice = (
+        str(voice_name or "").strip()
+        or os.getenv("BRAINEX_GEMINI_TTS_VOICE", "Kore").strip()
+        or "Kore"
+    )
+
+    def _generate_sync():
+        from google import genai
+        from scipy.signal import resample_poly
+        import math
+
+        client = genai.Client(api_key=api_key)
+        response = client.interactions.create(
+            model=model,
+            input=[{
+                "type": "user_input",
+                "content": [{
+                    "type": "text",
+                    "text": cleaned,
+                    "annotations": [{
+                        "type": "speech_metadata",
+                        "style": f"Speak clearly and naturally in {language_name}.",
+                    }],
+                }],
+            }],
+            response_format={"type": "audio"},
+            generation_config={"speech_config": [{"voice": voice}]},
+        )
+
+        output_audio = getattr(response, "output_audio", None)
+        encoded_audio = getattr(output_audio, "data", None)
+        if not encoded_audio:
+            raise RuntimeError("Gemini response did not contain audio data.")
+
+        wav_bytes = base64.b64decode(encoded_audio)
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            source_rate = wav_file.getframerate()
+            frame_count = wav_file.getnframes()
+            pcm = wav_file.readframes(frame_count)
+
+        if sample_width != 2:
+            raise RuntimeError(
+                f"Expected 16-bit Gemini audio; received {sample_width * 8}-bit."
+            )
+        if channels < 1 or source_rate < 1 or not pcm:
+            raise RuntimeError("Gemini returned an empty or invalid WAV file.")
+
+        samples = np.frombuffer(pcm, dtype="<i2")
+        if channels > 1:
+            usable = (len(samples) // channels) * channels
+            samples = samples[:usable].reshape(-1, channels).astype(np.int32)
+            samples = np.rint(samples.mean(axis=1)).astype(np.int16)
+
+        if source_rate != PCM_SAMPLE_RATE:
+            divisor = math.gcd(source_rate, PCM_SAMPLE_RATE)
+            samples = resample_poly(
+                samples,
+                PCM_SAMPLE_RATE // divisor,
+                source_rate // divisor,
+            )
+            samples = np.clip(
+                np.rint(samples), -32768, 32767
+            ).astype(np.int16)
+
+        result = samples.astype("<i2", copy=False).tobytes()
+        print(
+            f"[GEMINI TTS READY] language={language_code} | model={model} "
+            f"| source_rate={source_rate} | output_rate={PCM_SAMPLE_RATE} "
+            f"| pcm_bytes={len(result)}"
+        )
+        return result
+
     try:
-        rate = max(-10, min(10, int(settings.get("rate", SAPI_RATE))))
+        started = time.perf_counter()
+        pcm = await asyncio.to_thread(_generate_sync)
+        print(
+            f"[GEMINI TTS COMPLETE] duration={time.perf_counter() - started:.2f}s"
+        )
+        return pcm
+    except Exception as exc:
+        # Do not log the API key or request headers.
+        print(f"[GEMINI TTS ERROR] {type(exc).__name__}: {exc}")
+        return b""
+
+
+async def generate_voice_pcm_bytes(
+    text: str,
+    voice_settings: Optional[dict] = None,
+    language_code: str = DEFAULT_LANGUAGE_CODE,
+) -> bytes:
+    settings = voice_settings or {}
+    default_engine = (
+        "sapi" if sys.platform == "win32" else "azure"
+    )
+    engine = str(
+        settings.get("engine", TTS_ENGINE)
+        or TTS_ENGINE
+        or default_engine
+    ).strip().lower()
+
+    if sys.platform != "win32" and engine in ("sapi", "custom"):
+        print(
+            f"[TTS PLATFORM] Engine '{engine}' requires Windows; "
+            "using Azure TTS on this platform."
+        )
+        engine = "azure"
+
+    voice_name = str(
+        settings.get("voice_name", SAPI_VOICE)
+        or ""
+    ).strip()
+
+    language_code = str(
+        language_code or DEFAULT_LANGUAGE_CODE
+    ).strip().lower()
+
+    if language_code not in SUPPORTED_LANGUAGES:
+        language_code = DEFAULT_LANGUAGE_CODE
+
+    try:
+        rate = max(
+            -10,
+            min(
+                10,
+                int(settings.get("rate", SAPI_RATE)),
+            ),
+        )
     except (TypeError, ValueError):
         rate = SAPI_RATE
+
     try:
-        volume = max(0, min(100, int(settings.get("volume", SAPI_VOLUME))))
+        volume = max(
+            0,
+            min(
+                100,
+                int(settings.get("volume", SAPI_VOLUME)),
+            ),
+        )
     except (TypeError, ValueError):
         volume = SAPI_VOLUME
 
     settings["rate"] = rate
     settings["volume"] = volume
 
-    if engine == "custom":
-        return await generate_custom_voice_pcm_bytes(text, settings)
+    if engine == "gemini":
+        gemini_voice = str(
+            settings.get("gemini_voice_name", "")
+            or settings.get("voice_name", "")
+            or ""
+        ).strip()
+        print(
+            f"[AI VOICE SETTINGS] engine=gemini | language={language_code} "
+            f"| voice={gemini_voice or os.getenv('BRAINEX_GEMINI_TTS_VOICE', 'Kore')}"
+        )
+        pcm = await generate_gemini_pcm_bytes(
+            text,
+            language_code=language_code,
+            voice_name=gemini_voice,
+        )
+        if pcm:
+            return pcm
 
-    print(f"🔊 [AI VOICE SETTINGS] engine=sapi | voice={voice_name or '<Windows Default>'} | rate={rate} | volume={volume}")
-    return await generate_sapi_pcm_bytes(text, voice_name=voice_name, rate=rate, volume=volume)
+        print("[GEMINI TTS FALLBACK] Gemini returned no audio.")
+        if AZURE_SPEECH_KEY and AZURE_SPEECH_REGION:
+            engine = "azure"
+        elif sys.platform == "win32":
+            engine = "sapi"
+        else:
+            return b""
+
+    if engine == "custom":
+        return await generate_custom_voice_pcm_bytes(
+            text,
+            settings,
+        )
+
+    if engine == "azure":
+        azure_voice = AZURE_VOICE_BY_LANGUAGE.get(
+            language_code,
+            AZURE_VOICE_BY_LANGUAGE[DEFAULT_LANGUAGE_CODE],
+        )
+
+        print(
+            f"🔊 [AI VOICE SETTINGS] "
+            f"engine=azure | "
+            f"language={language_code} | "
+            f"voice={azure_voice}"
+        )
+
+        pcm = await generate_azure_pcm_bytes(
+            text,
+            language_code=language_code,
+            voice_name=azure_voice,
+        )
+
+        if pcm:
+            return pcm
+
+        print("[AZURE TTS ERROR] Azure returned no PCM.")
+        if sys.platform != "win32":
+            return b""
+
+        print(
+            "⚠️ [AZURE TTS FALLBACK] "
+            "Azure returned no PCM; falling back to Windows SAPI."
+        )
+
+    print(
+        f"🔊 [AI VOICE SETTINGS] "
+        f"engine=sapi | "
+        f"language={language_code} | "
+        f"voice={voice_name or '<Windows Default>'} | "
+        f"rate={rate} | volume={volume}"
+    )
+
+    return await generate_sapi_pcm_bytes(
+        text,
+        voice_name=voice_name,
+        rate=rate,
+        volume=volume,
+    )
 
 
 
@@ -517,6 +874,17 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             self.call_is_active = False
             self.greeting_sent = False
 
+            # Initial greeting strategy:
+            # - Wait for customer speech after the call is answered.
+            # - Neutral openings such as "hello"/"hi"/"yes"/"ok" do NOT decide language.
+            # - First meaningful supported utterance chooses the first greeting language.
+            # - If the customer only repeats neutral openings 3 times, stop waiting and
+            #   greet in the default language (English).
+            self.greeting_neutral_opening_count = 0
+            self.greeting_neutral_opening_limit = 3
+            self.greeting_language = DEFAULT_LANGUAGE_CODE
+            self.greeting_trigger_reason = ""
+
             self.is_ai_speaking = False
             self.is_tts_generating = False
 
@@ -525,6 +893,30 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             self.lead_details = ""
             self.call_transcript_log = []
             self.start_time = time.time()
+
+            # ----------------------------
+            # Customer language
+            # ----------------------------
+            # English is only the safe initial state before the customer speaks.
+            # Whisper updates this automatically after each supported utterance.
+            self.detected_language = DEFAULT_LANGUAGE_CODE
+            self.detected_language_name = SUPPORTED_LANGUAGES[DEFAULT_LANGUAGE_CODE]
+            self.language_probability = 0.0
+
+            # STT language decision state.
+            # We target 3 RELIABLE meaningful, language-bearing customer turns.
+            # Neutral words and low-confidence Whisper detections do not count.
+            # If the first 3 reliable turns conflict, learning continues until a
+            # clear winner exists instead of locking the wrong language.
+            self.language_final_locked = False
+            self.language_evidence_count = 0
+            self.language_lock_after_turns = 3
+            self.language_scores = {
+                code: 0.0
+                for code in SUPPORTED_LANGUAGES
+
+            }
+            self.language_observations = []
 
             # Controlled telecalling state. Brainex is the current reference
             # configuration, but the state machine itself is company-agnostic.
@@ -663,24 +1055,44 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
 
     def _normalize_turn_text(self, text: str) -> str:
+        # Unicode-safe so Malayalam/Tamil/Hindi/Arabic are preserved.
         return re.sub(
-            r"[^a-z0-9\s]",
+            r"[^\w\s]",
             "",
             str(text or "").lower(),
+            flags=re.UNICODE,
         ).strip()
 
     def _is_permission_turn(self, text: str):
         normalized = self._normalize_turn_text(text)
 
         allow = {
+            # English
             "yes", "yeah", "yep", "okay", "ok", "sure",
             "go ahead", "please tell me", "tell me",
             "continue", "you can", "please continue",
+            # Malayalam
+            "അതെ", "ശരി", "പറയൂ", "തുടരൂ",
+            # Tamil
+            "ஆம்", "ஆமாம்", "சரி", "சொல்லுங்கள்", "தொடருங்கள்",
+            # Hindi
+            "हाँ", "हां", "ठीक है", "बताइए", "बताओ", "जारी रखें",
+            # Arabic
+            "نعم", "حسنا", "حسنًا", "تفضل", "تابع",
         }
 
         refuse = {
+            # English
             "no", "no thanks", "no thank you",
             "not interested", "stop", "dont call", "do not call",
+            # Malayalam
+            "വേണ്ട", "താൽപര്യമില്ല", "വിളിക്കേണ്ട", "നിർത്തൂ",
+            # Tamil
+            "வேண்டாம்", "ஆர்வம் இல்லை", "அழைக்க வேண்டாம்", "நிறுத்துங்கள்",
+            # Hindi
+            "नहीं", "रुचि नहीं", "फोन मत करना", "बंद करें",
+            # Arabic
+            "لا", "غير مهتم", "لا تتصل", "توقف",
         }
 
         if normalized in allow:
@@ -831,7 +1243,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     # ------------------------------------------------------------------
     # DISCONNECT
     # ------------------------------------------------------------------
-    
+
     async def disconnect(self, close_code):
         print(f"🔌 [WS DISCONNECT] Code: {close_code}")
 
@@ -974,7 +1386,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     # ------------------------------------------------------------------
 
     async def receive(self, text_data=None, bytes_data=None):
-        
+
         if text_data is not None:
           print("📨 [WS TEXT RX] "f"length={len(text_data)}")
         # Raw audio means the transport/call is still alive.
@@ -1067,11 +1479,10 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
         if event == "call_answered":
             self.call_is_active = True
-            if not self.greeting_sent:
-                self.greeting_sent = True
-                self.greeting_task = self.create_background_task(
-                    self.trigger_initial_greeting()
-                )
+            print(
+                "✅ [CALL ANSWER CONFIRMED] "
+                "Waiting for the customer's first meaningful voice before greeting."
+            )
             return
 
         if event == "call_state_changed":
@@ -1094,10 +1505,9 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 self.call_is_active = True
 
                 if not self.greeting_sent:
-                    self.greeting_sent = True
-                    print("✅ [CALL ANSWER CONFIRMED] Starting greeting now.")
-                    self.greeting_task = self.create_background_task(
-                        self.trigger_initial_greeting()
+                    print(
+                        "✅ [CALL ANSWER CONFIRMED] "
+                        "Waiting for the customer's first meaningful voice before greeting."
                     )
 
             elif state == "OFFHOOK":
@@ -1204,7 +1614,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 )
 
             else:
-               
+
                 return
 
         else:
@@ -1261,98 +1671,462 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
     async def safe_process_audio_transcription(self, raw_audio_bytes):
         async with self.stt_processing_lock:
+
             if not self.is_connected or not self.call_is_active:
                 return
 
             try:
-                await self.process_audio_transcription(raw_audio_bytes)
+                await self.process_audio_transcription(
+                    raw_audio_bytes
+                )
+
             except asyncio.CancelledError:
                 print("⚠️ [STT TASK CANCELLED]")
                 raise
+
             except Exception as e:
                 print(
                     f"❌ [STT PIPELINE ERROR] "
                     f"{type(e).__name__}: {e}"
                 )
 
+
     async def process_audio_transcription(self, raw_audio_bytes):
         try:
             start = time.perf_counter()
 
             print(
-                f"🧠 [STT START] PCM bytes={len(raw_audio_bytes)} | "
+                f"🧠 [STT START] "
+                f"PCM bytes={len(raw_audio_bytes)} | "
                 f"ai_speaking={self.is_ai_speaking}"
             )
 
-            pcm_int16 = np.frombuffer(raw_audio_bytes, dtype=np.int16)
+            # ==========================================================
+            # 1. RAW PCM -> INT16
+            # ==========================================================
+
+            pcm_int16 = np.frombuffer(
+                raw_audio_bytes,
+                dtype=np.int16,
+            )
+
             if pcm_int16.size == 0:
+                print("⚠️ [STT EMPTY AUDIO]")
                 return
+
+            audio_seconds = (
+                len(pcm_int16)
+                / float(PCM_SAMPLE_RATE)
+            )
+
+            # ==========================================================
+            # 2. AUDIO ENERGY
+            # ==========================================================
+
+            pcm_float = pcm_int16.astype(np.float32)
 
             rms = float(
-                np.sqrt(np.mean(pcm_int16.astype(np.float32) ** 2))
+                np.sqrt(
+                    np.mean(
+                        pcm_float ** 2
+                    )
+                )
             )
-            if rms < 20:
-                print(f"⚠️ [STT SKIP SILENCE] rms={rms:.2f}")
-                return
 
-            audio_float32 = pcm_int16.astype(np.float32) / 32768.0
-            max_peak = float(np.max(np.abs(audio_float32)))
-
-            audio_seconds = len(pcm_int16) / float(PCM_SAMPLE_RATE)
+            peak_int16 = int(
+                np.max(
+                    np.abs(
+                        pcm_float
+                    )
+                )
+            )
 
             print(
-                f"🧠 [STT AUDIO] samples={len(pcm_int16)} | "
+                f"🧠 [STT INPUT] "
                 f"duration={audio_seconds:.2f}s | "
-                f"peak={max_peak:.4f} | rms={rms:.2f}"
+                f"rms={rms:.2f} | "
+                f"peak={peak_int16}"
             )
 
-            # IMPORTANT:
-            # Do not normalize every telephone utterance to full scale.
-            # The old `audio_float32 / max_peak` amplified line noise,
-            # background noise and codec artifacts together with speech.
-            # Only apply a conservative gain to genuinely quiet recordings.
-            if 0.003 <= max_peak < 0.08:
+            # ==========================================================
+            # 3. EARLY NOISE / SILENCE FILTER
+            # ==========================================================
+
+            STT_MIN_RMS = 180.0
+            STT_MIN_DURATION = 0.35
+
+            if audio_seconds < STT_MIN_DURATION:
+                print(
+                    f"⚠️ [STT SKIP TOO SHORT] "
+                    f"duration={audio_seconds:.2f}s"
+                )
+                return
+
+            if rms < STT_MIN_RMS:
+                print(
+                    f"⚠️ [STT SKIP LOW ENERGY] "
+                    f"rms={rms:.2f} | "
+                    f"threshold={STT_MIN_RMS:.0f}"
+                )
+                return
+
+            # ==========================================================
+            # 4. INT16 -> FLOAT32
+            # ==========================================================
+
+            audio_float32 = (
+                pcm_int16.astype(np.float32)
+                / 32768.0
+            )
+
+            max_peak = float(
+                np.max(
+                    np.abs(audio_float32)
+                )
+            )
+
+            print(
+                f"🧠 [STT AUDIO] "
+                f"samples={len(pcm_int16)} | "
+                f"duration={audio_seconds:.2f}s | "
+                f"peak={max_peak:.4f} | "
+                f"rms={rms:.2f}"
+            )
+
+            # ==========================================================
+            # 5. QUIET SPEECH GAIN
+            # ==========================================================
+
+            if 0.01 <= max_peak < 0.08:
+
                 target_peak = 0.18
-                gain = min(4.0, target_peak / max_peak)
+
+                gain = min(
+                    3.0,
+                    target_peak / max_peak,
+                )
+
                 audio_float32 = np.clip(
                     audio_float32 * gain,
                     -1.0,
                     1.0,
                 )
+
                 print(
                     f"🔉 [STT QUIET AUDIO GAIN] "
                     f"gain={gain:.2f}x"
                 )
 
-            segments, info = await asyncio.to_thread(
-                whisper_model.transcribe,
-                audio_float32,
-                beam_size=1,
-                best_of=1,
-                language="en",
-                task="transcribe",
-                condition_on_previous_text=False,
+            # ==========================================================
+            # 6. STT LANGUAGE MODE - 5 TURN LEARNING WINDOW
+            #
+            # BEFORE final lock:
+            #     language=None
+            #     Whisper performs one automatic-language transcription.
+            #
+            # AFTER 3 meaningful language-bearing turns:
+            #     language=<locked language>
+            #     No more automatic language detection for this call.
+            #
+            # This avoids repeated language-decision work and prevents common
+            # words such as yes/ok/hello from changing the call language.
+            # ==========================================================
 
-                # We already perform cellular VAD/endpointing above.
-                # Running Whisper VAD a second time can clip short words,
-                # especially "yes", "no", names, and telephone speech.
-                vad_filter=False,
-
-                temperature=0.0,
-                compression_ratio_threshold=2.4,
-                log_prob_threshold=-1.0,
-                no_speech_threshold=0.6,
-                word_timestamps=False,
+            language_final_locked = bool(
+                getattr(
+                    self,
+                    "language_final_locked",
+                    False,
+                )
             )
 
-            segments = list(segments)
-            user_text = "".join(s.text for s in segments).strip()
+            locked_language = getattr(
+                self,
+                "detected_language",
+                DEFAULT_LANGUAGE_CODE,
+            )
 
-            detected_language = getattr(info, "language", "en")
-            language_probability = getattr(
-                info,
-                "language_probability",
-                0.0,
+            requested_language = (
+                locked_language
+                if language_final_locked
+                else None
+            )
+
+            evidence_count = int(
+                getattr(
+                    self,
+                    "language_evidence_count",
+                    0,
+                )
+                or 0
+            )
+
+            lock_after = max(
+                1,
+                int(
+                    getattr(
+                        self,
+                        "language_lock_after_turns",
+                        3,
+                    )
+                    or 3
+                ),
+            )
+
+            print(
+                f"🌐 [STT LANGUAGE MODE] "
+                f"mode={'LOCKED' if language_final_locked else 'LEARNING'} | "
+                f"requested={requested_language or 'auto'} | "
+                f"evidence={evidence_count}/{lock_after} | "
+                f"active={locked_language}"
+            )
+
+            # ==========================================================
+            # 7. LOCAL WHISPER HELPER
+            # ==========================================================
+
+            async def _transcribe_once(language_code):
+                transcribe_started = time.perf_counter()
+
+                segs, info_obj = await asyncio.to_thread(
+                    whisper_model.transcribe,
+                    audio_float32,
+
+                    beam_size=1,
+                    best_of=1,
+
+                    language=language_code,
+
+                    task="transcribe",
+
+                    condition_on_previous_text=False,
+
+                    # Telephone VAD is already handled before this point.
+                    vad_filter=False,
+
+                    temperature=0.0,
+
+                    compression_ratio_threshold=2.2,
+                    log_prob_threshold=-1.0,
+                    no_speech_threshold=0.65,
+
+                    word_timestamps=False,
+                )
+
+                segs = list(segs)
+
+                transcript = "".join(
+                    segment.text
+                    for segment in segs
+                ).strip()
+
+                if language_code is None:
+                    lang = str(
+                        getattr(
+                            info_obj,
+                            "language",
+                            DEFAULT_LANGUAGE_CODE,
+                        )
+                        or DEFAULT_LANGUAGE_CODE
+                    ).strip().lower()
+
+                    lang_probability = float(
+                        getattr(
+                            info_obj,
+                            "language_probability",
+                            0.0,
+                        )
+                        or 0.0
+                    )
+                else:
+                    # Faster-Whisper was explicitly guided, so the language
+                    # used for decoding is the requested language.
+                    lang = str(language_code).strip().lower()
+
+                    lang_probability = float(
+                        getattr(
+                            info_obj,
+                            "language_probability",
+                            1.0,
+                        )
+                        or 1.0
+                    )
+
+                elapsed = (
+                    time.perf_counter()
+                    - transcribe_started
+                )
+
+                return {
+                    "segments": segs,
+                    "info": info_obj,
+                    "text": transcript,
+                    "language": lang,
+                    "probability": lang_probability,
+                    "elapsed": elapsed,
+                    "guided": language_code is not None,
+                }
+
+            # ==========================================================
+            # 8. TRANSCRIPT QUALITY HELPERS
+            # ==========================================================
+
+            def _clean_unicode_text(value):
+                return re.sub(
+                    r"[^\w\s]",
+                    "",
+                    str(value or "").lower(),
+                    flags=re.UNICODE,
+                ).strip()
+
+            def _native_script_count(value, language_code):
+                value = str(value or "")
+
+                ranges = {
+                    "ml": [(0x0D00, 0x0D7F)],
+                    "ta": [(0x0B80, 0x0BFF)],
+                    "hi": [(0x0900, 0x097F)],
+                    # Arabic letters can occur across several Unicode blocks.
+                    "ar": [
+                        (0x0600, 0x06FF),
+                        (0x0750, 0x077F),
+                        (0x08A0, 0x08FF),
+                        (0xFB50, 0xFDFF),
+                        (0xFE70, 0xFEFF),
+                    ],
+                }
+
+                language_ranges = ranges.get(language_code)
+
+                if language_ranges is None:
+                    return 0
+
+                return sum(
+                    1
+                    for ch in value
+                    if any(
+                        low <= ord(ch) <= high
+                        for low, high in language_ranges
+                    )
+                )
+
+            def _looks_like_repetition(value):
+                clean_value = _clean_unicode_text(value)
+
+                if not clean_value:
+                    return True
+
+                words_local = clean_value.split()
+
+                if (
+                    len(words_local) >= 4
+                    and len(set(words_local)) == 1
+                ):
+                    return True
+
+                compact = re.sub(
+                    r"\s+",
+                    "",
+                    clean_value,
+                )
+
+                if len(compact) >= 12:
+                    counts = {}
+
+                    for char in compact:
+                        counts[char] = (
+                            counts.get(char, 0)
+                            + 1
+                        )
+
+                    dominant_ratio = (
+                        max(counts.values())
+                        / len(compact)
+                    )
+
+                    if dominant_ratio >= 0.55:
+                        return True
+
+                if (
+                    len(compact) >= 20
+                    and len(set(compact)) <= 4
+                ):
+                    return True
+
+                return False
+
+            def _guided_result_needs_auto_check(value, language_code):
+                value = str(value or "").strip()
+
+                if not value:
+                    return True
+
+                if _looks_like_repetition(value):
+                    return True
+
+                clean_value = _clean_unicode_text(value)
+                words_local = clean_value.split()
+
+                # For Malayalam/Tamil/Hindi/Arabic, a longer result containing
+                # no characters from the active script can be a translation-like
+                # hallucination. Code-mixed short replies remain allowed.
+                if (
+                    language_code in {"ml", "ta", "hi", "ar"}
+                    and len(words_local) >= 3
+                    and len(clean_value) >= 10
+                    and _native_script_count(
+                        value,
+                        language_code,
+                    ) == 0
+                ):
+                    return True
+
+                return False
+
+            # ==========================================================
+            # 9. PRIMARY WHISPER PASS
+            # ==========================================================
+
+            result = await _transcribe_once(
+                requested_language
+            )
+
+            print(
+                f"🧠 [WHISPER PASS] "
+                f"mode={'GUIDED' if result['guided'] else 'AUTO'} | "
+                f"time={result['elapsed']:.2f}s | "
+                f"segments={len(result['segments'])} | "
+                f"language={result['language']} | "
+                f"lang_prob={result['probability']:.2f}"
+            )
+
+            # ==========================================================
+            # 10. SINGLE-PASS POLICY
+            #
+            # During the first 3 meaningful language-bearing turns we do NOT
+            # re-run Whisper with a language hint. One AUTO pass is enough to
+            # gather language evidence. This avoids doubling STT latency.
+            #
+            # Once the call language is finally locked, requested_language is
+            # fixed and Whisper decodes directly in that language. Suspicious
+            # guided results are rejected later instead of triggering another
+            # automatic-language pass.
+            # ==========================================================
+
+            # ==========================================================
+            # 12. FINAL RESULT FROM STT PASSES
+            # ==========================================================
+
+            segments = result["segments"]
+            user_text = result["text"]
+            detected_language = result["language"]
+            language_probability = result["probability"]
+
+            detected_language_name = (
+                SUPPORTED_LANGUAGES.get(
+                    detected_language,
+                    "Unsupported",
+                )
             )
 
             print(
@@ -1362,23 +2136,172 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 f"language={detected_language} | "
                 f"lang_prob={language_probability:.2f}"
             )
-            print(f"🗣️ [WHISPER RESULT]: '{user_text}'")
 
-            clean_check = re.sub(
-                r"[^\w\s]",
-                "",
-                user_text.lower(),
-            ).strip()
+            print(
+                f"🌐 [LANGUAGE DETECTED] "
+                f"code={detected_language} | "
+                f"name={detected_language_name} | "
+                f"confidence={language_probability:.2f}"
+            )
+
+            print(
+                f"🗣️ [WHISPER RESULT]: "
+                f"'{user_text}'"
+            )
+
+            # ==========================================================
+            # 13. EMPTY RESULT
+            # ==========================================================
+
+            if not user_text:
+                print(
+                    "⚠️ [WHISPER EMPTY RESULT]"
+                )
+                return
+
+            # ==========================================================
+            # 14. REJECT UNSUPPORTED AUTO-DETECTED LANGUAGE
+            # ==========================================================
+
+            if (
+                detected_language
+                not in SUPPORTED_LANGUAGES
+            ):
+                print(
+                    f"🛑 [UNSUPPORTED TRANSCRIPT REJECTED] "
+                    f"language={detected_language} | "
+                    f"confidence="
+                    f"{language_probability:.2f} | "
+                    f"text='{user_text[:100]}'"
+                )
+                return
+
+            # ==========================================================
+            # 15. CLEAN TEXT
+            # ==========================================================
+
+            clean_check = _clean_unicode_text(
+                user_text
+            )
+
+            if not clean_check:
+                print(
+                    f"⚠️ [WHISPER CLEAN RESULT EMPTY]: "
+                    f"'{user_text}'"
+                )
+                return
+
+            words = clean_check.split()
+
+            # ==========================================================
+            # 16. KNOWN WHISPER HALLUCINATIONS
+            # ==========================================================
 
             hallucinations = {
+                "you",
                 "you you",
-                "thank you",
-                "subtitles",
-                "amaraorg",
-                "mb",
                 "thank you for watching",
                 "thanks for watching",
+                "subtitles",
+                "amaraorg",
+                "amara org",
+                "mb",
             }
+
+            if clean_check in hallucinations:
+                print(
+                    f"⚠️ [KNOWN WHISPER HALLUCINATION] "
+                    f"'{user_text}'"
+                )
+                return
+
+            # ==========================================================
+            # 17. REPETITION DETECTOR
+            # ==========================================================
+
+            compact_text = re.sub(
+                r"\s+",
+                "",
+                clean_check,
+            )
+
+            if (
+                len(words) >= 4
+                and len(set(words)) == 1
+            ):
+                print(
+                    f"⚠️ [WHISPER WORD REPETITION IGNORED] "
+                    f"'{user_text[:120]}'"
+                )
+                return
+
+            if len(compact_text) >= 12:
+
+                char_counts = {}
+
+                for char in compact_text:
+                    char_counts[char] = (
+                        char_counts.get(char, 0)
+                        + 1
+                    )
+
+                most_common_count = max(
+                    char_counts.values()
+                )
+
+                dominant_ratio = (
+                    most_common_count
+                    / len(compact_text)
+                )
+
+                if dominant_ratio >= 0.55:
+                    print(
+                        f"⚠️ [WHISPER CHARACTER REPETITION "
+                        f"IGNORED] "
+                        f"ratio={dominant_ratio:.2f} | "
+                        f"'{user_text[:120]}'"
+                    )
+                    return
+
+            if (
+                len(compact_text) >= 20
+                and len(set(compact_text)) <= 4
+            ):
+                print(
+                    f"⚠️ [WHISPER LOW-DIVERSITY "
+                    f"HALLUCINATION] "
+                    f"unique_chars="
+                    f"{len(set(compact_text))} | "
+                    f"'{user_text[:120]}'"
+                )
+                return
+
+            # ==========================================================
+            # 17B. LOCKED-LANGUAGE GUIDED RESULT SAFETY
+            #
+            # After the final lock we intentionally do not run AUTO language
+            # detection again. If a guided result is obviously suspicious,
+            # reject it instead of spending another Whisper pass.
+            # ==========================================================
+
+            if (
+                bool(getattr(self, "language_final_locked", False))
+                and requested_language is not None
+                and _guided_result_needs_auto_check(
+                    user_text,
+                    requested_language,
+                )
+            ):
+                print(
+                    f"🛑 [LOCKED LANGUAGE SUSPICIOUS RESULT REJECTED] "
+                    f"language={requested_language} | "
+                    f"text='{user_text[:120]}'"
+                )
+                return
+
+            # ==========================================================
+            # 18. ALLOWED SHORT ENGLISH WORDS
+            # ==========================================================
 
             allowed_single_words = {
                 "hello",
@@ -1393,45 +2316,420 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 "wait",
                 "repeat",
                 "bye",
+                "continue",
+                "stop",
             }
 
-            words = clean_check.split()
+            # These are common conversational words/phrases used by speakers
+            # of many languages. They are valid customer turns, but MUST NOT
+            # be used to lock, confirm, or switch the caller language.
+            language_neutral_utterances = {
+                "hello",
+                "hi",
+                "hey",
+                "hii",
+                "yes",
+                "yeah",
+                "yep",
+                "no",
+                "okay",
+                "ok",
+                "sure",
+                "right",
+                "correct",
+                "thanks",
+                "thank you",
+                "thanks a lot",
+                "please",
+                "wait",
+                "repeat",
+                "continue",
+                "stop",
+                "bye",
+                "goodbye",
+                "go ahead",
+                "tell me",
+                "please tell me",
+            }
 
-            # Reject obvious Whisper repetition hallucinations caused by
-            # low-level telephone noise, for example:
-            # "Okay. Okay. Okay. Okay. ..."
-            #
-            # A genuine one-word reply such as "Okay." is still accepted.
-            if len(words) >= 4 and len(set(words)) == 1:
+            is_language_neutral_turn = (
+                clean_check in language_neutral_utterances
+            )
+
+            # ==========================================================
+            # 18B. TRANSCRIPT QUALITY MUST PASS BEFORE LANGUAGE EVIDENCE
+            # ==========================================================
+            # This is intentionally before the language-evidence block. A text
+            # that will later be rejected must never be allowed to vote for the
+            # customer's permanent language.
+            current_active_language = getattr(
+                self,
+                "detected_language",
+                DEFAULT_LANGUAGE_CODE,
+            )
+
+            if (
+                len(words) == 1
+                and current_active_language == "en"
+                and clean_check not in allowed_single_words
+            ):
                 print(
-                    f"⚠️ [WHISPER REPETITION IGNORED]: "
+                    f"⚠️ [SHORT ENGLISH RESULT IGNORED] "
                     f"'{user_text}'"
                 )
                 return
 
-            useful = (
-                bool(user_text)
-                and len(clean_check) >= 2
-                and clean_check not in hallucinations
-                and (
-                    len(words) >= 2
-                    or clean_check in allowed_single_words
+            if (
+                language_probability < 0.25
+                and len(words) <= 2
+            ):
+                print(
+                    f"⚠️ [LOW CONFIDENCE TRANSCRIPT IGNORED] "
+                    f"confidence={language_probability:.2f} | "
+                    f"text='{user_text}'"
+                )
+                return
+
+            # ==========================================================
+            # 19. LANGUAGE EVIDENCE + SAFE 3-TURN TARGET LOCK
+            # ==========================================================
+
+            current_language = getattr(
+                self,
+                "detected_language",
+                DEFAULT_LANGUAGE_CODE,
+            )
+
+            language_final_locked = bool(
+                getattr(
+                    self,
+                    "language_final_locked",
+                    False,
                 )
             )
 
-            if not useful:
-                print(f"⚠️ [WHISPER IGNORED]: '{user_text}'")
+            # ----------------------------------------------------------
+            # Already locked: never reconsider the language.
+            # ----------------------------------------------------------
+            if language_final_locked:
+                print(
+                    f"🔒 [LANGUAGE FINAL LOCK ACTIVE] "
+                    f"{self.detected_language_name} "
+                    f"({self.detected_language}) | "
+                    f"Whisper guided={detected_language}"
+                )
+
+            # ----------------------------------------------------------
+            # Neutral utterance: valid customer speech, zero evidence.
+            # ----------------------------------------------------------
+            elif is_language_neutral_turn:
+                print(
+                    f"🟨 [LANGUAGE NEUTRAL TURN] "
+                    f"text='{user_text}' | "
+                    f"Whisper={detected_language}/"
+                    f"{language_probability:.2f} | "
+                    f"evidence remains="
+                    f"{self.language_evidence_count}/"
+                    f"{self.language_lock_after_turns}"
+                )
+
+            # ----------------------------------------------------------
+            # Meaningful supported utterance: only RELIABLE Whisper language
+            # detections may contribute evidence.
+            # ----------------------------------------------------------
+            elif language_probability < MIN_LANGUAGE_EVIDENCE_CONFIDENCE:
+                print(
+                    f"⚠️ [LANGUAGE EVIDENCE REJECTED] "
+                    f"heard={detected_language}/"
+                    f"{language_probability:.2f} | "
+                    f"minimum={MIN_LANGUAGE_EVIDENCE_CONFIDENCE:.2f} | "
+                    f"evidence remains="
+                    f"{self.language_evidence_count}/"
+                    f"{self.language_lock_after_turns} | "
+                    f"text='{user_text[:120]}'"
+                )
+
+            else:
+                score = min(1.0, float(language_probability))
+
+                self.language_scores[detected_language] = (
+                    float(
+                        self.language_scores.get(
+                            detected_language,
+                            0.0,
+                        )
+                    )
+                    + score
+                )
+
+                self.language_evidence_count += 1
+
+                self.language_observations.append({
+                    "turn": self.language_evidence_count,
+                    "language": detected_language,
+                    "confidence": language_probability,
+                    "text": user_text[:120],
+                })
+
+                # Provisional leader is useful for logs/UI, but it does NOT
+                # change Whisper decoding during the 5-turn learning window.
+                provisional_language = max(
+                    self.language_scores,
+                    key=self.language_scores.get,
+                )
+
+                provisional_score = float(
+                    self.language_scores.get(
+                        provisional_language,
+                        0.0,
+                    )
+                )
+
+                self.detected_language = provisional_language
+                self.detected_language_name = SUPPORTED_LANGUAGES[
+                    provisional_language
+                ]
+                self.language_probability = provisional_score / max(
+                    1,
+                    self.language_evidence_count,
+                )
+
+                scores_text = ", ".join(
+                    f"{code}={self.language_scores.get(code, 0.0):.2f}"
+                    for code in SUPPORTED_LANGUAGES
+                )
+
+                print(
+                    f"🗳️ [LANGUAGE EVIDENCE] "
+                    f"turn={self.language_evidence_count}/"
+                    f"{self.language_lock_after_turns} | "
+                    f"heard={detected_language}/"
+                    f"{language_probability:.2f} | "
+                    f"leader={provisional_language} | "
+                    f"scores=[{scores_text}]"
+                )
+
+                # ------------------------------------------------------
+                # Target lock after 3 reliable meaningful turns.
+                # A clear winner is required: >=60% of weighted evidence and
+                # at least 2 reliable observations for the winning language.
+                # If evidence conflicts, stay in learning mode rather than
+                # permanently locking the wrong language.
+                # ------------------------------------------------------
+                if (
+                    self.language_evidence_count
+                    >= self.language_lock_after_turns
+                ):
+                    final_language = max(
+                        self.language_scores,
+                        key=self.language_scores.get,
+                    )
+
+                    final_score = float(
+                        self.language_scores.get(
+                            final_language,
+                            0.0,
+                        )
+                    )
+
+                    total_score = sum(
+                        float(v)
+                        for v in self.language_scores.values()
+                    )
+
+                    final_share = (
+                        final_score / total_score
+                        if total_score > 0
+                        else 0.0
+                    )
+
+                    winner_turns = sum(
+                        1
+                        for obs in self.language_observations
+                        if obs.get("language") == final_language
+                    )
+
+                    if (
+                        final_share >= MIN_LANGUAGE_LOCK_SHARE
+                        and winner_turns >= MIN_LANGUAGE_LOCK_WINNER_TURNS
+                    ):
+                        self.detected_language = final_language
+                        self.detected_language_name = SUPPORTED_LANGUAGES[
+                            final_language
+                        ]
+                        self.language_probability = final_share
+                        self.language_final_locked = True
+
+                        print(
+                            f"🔐 [LANGUAGE FINAL LOCK] "
+                            f"{self.detected_language_name} "
+                            f"({self.detected_language}) | "
+                            f"evidence_turns="
+                            f"{self.language_evidence_count} | "
+                            f"winner_turns={winner_turns} | "
+                            f"score={final_score:.2f} | "
+                            f"share={final_share:.2f}"
+                        )
+                    else:
+                        print(
+                            f"⏳ [LANGUAGE LOCK DEFERRED] "
+                            f"leader={final_language} | "
+                            f"winner_turns={winner_turns} | "
+                            f"share={final_share:.2f} | "
+                            f"need_share>={MIN_LANGUAGE_LOCK_SHARE:.2f} | "
+                            f"need_winner_turns>="
+                            f"{MIN_LANGUAGE_LOCK_WINNER_TURNS}"
+                        )
+
+            # ==========================================================
+            # 20. FINAL ACCEPTED CUSTOMER TRANSCRIPT
+            # ==========================================================
+
+            print(
+                f"✅ [CUSTOMER TRANSCRIPT] "
+                f"[{self.detected_language_name}/"
+                f"{self.detected_language}] "
+                f"Whisper={detected_language}/"
+                f"{language_probability:.2f}: "
+                f"{user_text}"
+            )
+
+            self.call_transcript_log.append(
+                f"Customer: {user_text}"
+            )
+
+            self.last_activity_time = (
+                time.time()
+            )
+
+            # ==========================================================
+            # 22. CUSTOMER OPENING -> START INITIAL GREETING
+            #
+            # Rules:
+            # 1) Neutral words such as "hello", "hi", "yes", "ok" do NOT
+            #    decide the customer's language.
+            # 2) The first meaningful supported utterance chooses the language
+            #    of the FIRST greeting immediately.
+            # 3) The permanent STT language is still decided separately from
+            #    the first 3 meaningful language-bearing customer turns.
+            # 4) If the customer only repeats neutral opening words 3 times,
+            #    stop waiting and greet in the default language (English).
+            #
+            # Neutral opening repetitions do NOT count toward the 5-turn
+            # permanent language evidence window.
+            # ==========================================================
+
+            if not self.greeting_sent:
+                if (
+                    not is_language_neutral_turn
+                    and language_probability < MIN_LANGUAGE_EVIDENCE_CONFIDENCE
+                ):
+                    print(
+                        f"👂 [GREETING WAIT] Weak language detection "
+                        f"{detected_language}/{language_probability:.2f} | "
+                        f"need>={MIN_LANGUAGE_EVIDENCE_CONFIDENCE:.2f}"
+                    )
+                    return
+
+                if is_language_neutral_turn:
+                    self.greeting_neutral_opening_count = int(
+                        getattr(
+                            self,
+                            "greeting_neutral_opening_count",
+                            0,
+                        )
+                        or 0
+                    ) + 1
+
+                    neutral_limit = max(
+                        1,
+                        int(
+                            getattr(
+                                self,
+                                "greeting_neutral_opening_limit",
+                                3,
+                            )
+                            or 3
+                        ),
+                    )
+
+                    print(
+                        f"👂 [GREETING WAIT] "
+                        f"Neutral opening heard='{user_text}' | "
+                        f"count={self.greeting_neutral_opening_count}/"
+                        f"{neutral_limit}"
+                    )
+
+                    if self.greeting_neutral_opening_count < neutral_limit:
+                        return
+
+                    self.greeting_sent = True
+                    self.greeting_language = DEFAULT_LANGUAGE_CODE
+                    self.greeting_trigger_reason = "neutral_opening_fallback"
+
+                    print(
+                        f"▶️ [GREETING DEFAULT FALLBACK] "
+                        f"neutral_openings="
+                        f"{self.greeting_neutral_opening_count} | "
+                        f"language="
+                        f"{SUPPORTED_LANGUAGES[DEFAULT_LANGUAGE_CODE]}"
+                    )
+
+                    if self.is_connected and self.call_is_active:
+                        self.greeting_task = self.create_background_task(
+                            self.trigger_initial_greeting(
+                                language_code=DEFAULT_LANGUAGE_CODE,
+                                trigger_reason="neutral_opening_fallback",
+                            )
+                        )
+
+                    return
+
+                greeting_language = (
+                    detected_language
+                    if detected_language in SUPPORTED_LANGUAGES
+                    else DEFAULT_LANGUAGE_CODE
+                )
+
+                self.greeting_sent = True
+                self.greeting_language = greeting_language
+                self.greeting_trigger_reason = "first_meaningful_customer_voice"
+
+                print(
+                    f"▶️ [GREETING TRIGGERED BY CUSTOMER] "
+                    f"first_meaningful='{user_text[:120]}' | "
+                    f"Whisper={detected_language}/"
+                    f"{language_probability:.2f} | "
+                    f"greeting_language="
+                    f"{SUPPORTED_LANGUAGES.get(greeting_language, 'English')}"
+                )
+
+                if self.is_connected and self.call_is_active:
+                    self.greeting_task = self.create_background_task(
+                        self.trigger_initial_greeting(
+                            language_code=greeting_language,
+                            trigger_reason="first_meaningful_customer_voice",
+                        )
+                    )
+
                 return
 
-            print(f"✅ [CUSTOMER TRANSCRIPT]: {user_text}")
-            self.call_transcript_log.append(f"Customer: {user_text}")
-            self.last_activity_time = time.time()
+            # ==========================================================
+            # 23. NORMAL CUSTOMER TURN -> SEND TO AI
+            # ==========================================================
 
-            if self.is_connected and self.call_is_active:
-                await self.submit_user_turn(user_text)
+            if (
+                self.is_connected
+                and self.call_is_active
+            ):
+
+                await self.submit_user_turn(
+                    user_text
+                )
 
         except asyncio.CancelledError:
             raise
+
         except Exception as e:
             print(
                 f"❌ [TRANSCRIPTION FAIL] "
@@ -1442,7 +2740,11 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     # GREETING
     # ------------------------------------------------------------------
 
-    async def trigger_initial_greeting(self):
+    async def trigger_initial_greeting(
+        self,
+        language_code: str = DEFAULT_LANGUAGE_CODE,
+        trigger_reason: str = "",
+    ):
         try:
             # Small delay lets call state settle but avoids a long dead-air gap.
             await asyncio.sleep(0.15)
@@ -1452,14 +2754,61 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
             script_data = await self.get_runtime_configuration()
 
-            greeting = (
-                script_data["greeting"].strip()
-                if script_data and script_data.get("greeting")
-                else (
-                    "Hello, I'm the AI calling assistant from Brainex AI "
-                    "Institute. May I briefly tell you about our practical "
-                    "AI training programs?"
+            language_code = str(
+                language_code
+                or DEFAULT_LANGUAGE_CODE
+            ).strip().lower()
+
+            if language_code not in SUPPORTED_LANGUAGES:
+                language_code = DEFAULT_LANGUAGE_CODE
+
+            multilingual_greetings = {
+                "ml": (
+                    "നമസ്കാരം. ഞാൻ Brainex AI Institute-ൽ നിന്നുള്ള AI calling "
+                    "assistant ആണ്. ഞങ്ങളുടെ practical AI training programs-നെ "
+                    "കുറിച്ച് ചുരുക്കമായി പറയട്ടേ?"
+                ),
+                "ta": (
+                    "வணக்கம். நான் Brainex AI Institute-இன் AI calling assistant. "
+                    "எங்களுடைய practical AI training programs பற்றி சுருக்கமாக "
+                    "சொல்லலாமா?"
+                ),
+                "hi": (
+                    "नमस्ते। मैं Brainex AI Institute का AI calling assistant हूँ। "
+                    "क्या मैं आपको हमारे practical AI training programs के बारे "
+                    "में संक्षेप में बता सकता हूँ?"
+                ),
+                "ar": (
+                    "مرحباً. أنا المساعد الآلي للاتصالات من Brainex AI Institute. "
+                    "هل يمكنني أن أشرح لك باختصار برامجنا التدريبية العملية في الذكاء الاصطناعي؟"
+                ),
+            }
+
+            if language_code == "en":
+                greeting = (
+                    script_data["greeting"].strip()
+                    if script_data and script_data.get("greeting")
+                    else (
+                        "Hello, I'm the AI calling assistant from Brainex AI "
+                        "Institute. May I briefly tell you about our practical "
+                        "AI training programs?"
+                    )
                 )
+            else:
+                greeting = multilingual_greetings.get(
+                    language_code,
+                    (
+                        "Hello, I'm the AI calling assistant from Brainex AI "
+                        "Institute. May I briefly tell you about our practical "
+                        "AI training programs?"
+                    ),
+                )
+
+            print(
+                f"🌐 [GREETING LANGUAGE] "
+                f"{SUPPORTED_LANGUAGES.get(language_code, 'English')} "
+                f"({language_code}) | "
+                f"reason={trigger_reason or 'unspecified'}"
             )
 
             # Telephone greeting guard: preserve the configured company
@@ -1489,6 +2838,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 pcm = await generate_voice_pcm_bytes(
                     greeting,
                     script_data.get("tts_settings", {}),
+                    language_code=language_code,
                 )
             finally:
                 self.is_tts_generating = False
@@ -1520,7 +2870,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 "🎧 [CUSTOMER DOWNLINK READY] Waiting for remote customer audio..."
             )
 
-  
+
     async def process_text_inference(
         self,
         user_text: str,
@@ -1669,6 +3019,14 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 customer_profile=self.customer_profile,
                 stage=self.conversation_stage,
                 user_text=user_text,
+                response_language=getattr(
+                    self,
+                    "detected_language",
+                    DEFAULT_LANGUAGE_CODE,
+                ),
+                language_locked=bool(
+                    getattr(self, "language_final_locked", False)
+                ),
             )
 
             # --------------------------------------------------------------
@@ -1845,6 +3203,14 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                             "Answer the customer's actual latest question "
                             "naturally using a different response."
                         ),
+                        response_language=getattr(
+                            self,
+                            "detected_language",
+                            DEFAULT_LANGUAGE_CODE,
+                        ),
+                        language_locked=bool(
+                            getattr(self, "language_final_locked", False)
+                        ),
                     )
                 )
 
@@ -1944,6 +3310,11 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                     await generate_voice_pcm_bytes(
                         reply,
                         config.get("tts_settings", {}),
+                        language_code=getattr(
+                            self,
+                            "detected_language",
+                            DEFAULT_LANGUAGE_CODE,
+                        ),
                     )
                 )
 
@@ -2365,24 +3736,13 @@ Return ONLY valid JSON:
 """
 
         try:
-            client = ollama.AsyncClient()
-            response = await client.generate(
-                model="llama3.2",
-                prompt=analyzer_prompt,
-                stream=False,
-                format="json",
-                keep_alive="30m",
-                options={
-                    "temperature": 0.1,
-                    "num_predict": 180,
-                    "num_ctx": 2048,
-                    "num_thread": max(1, (os.cpu_count() or 4) - 1),
-                },
+            response_text, model_name = await generate_gemini_json(
+                analyzer_prompt,
+                temperature=0.1,
+                max_output_tokens=400,
             )
 
-            parsed = _extract_json_object(
-                response.get("response", "")
-            )
+            parsed = _extract_json_object(response_text)
             if not parsed:
                 print(
                     "⚠️ [POST CALL ANALYZER] Invalid JSON; using fallback."
@@ -2763,9 +4123,26 @@ Return ONLY valid JSON:
             except (TypeError, ValueError):
                 tts_volume = 100
 
-            tts_engine = str(
+            configured_tts_engine = str(
                 getattr(settings, "tts_engine", "sapi") or "sapi"
             ).strip().lower()
+
+            # Environment variable can override DB selection for deployment.
+            tts_engine = str(
+                os.getenv(
+                    "BRAINEX_TTS_ENGINE",
+                    configured_tts_engine,
+                )
+                or configured_tts_engine
+                or "sapi"
+            ).strip().lower()
+
+            if tts_engine not in {"sapi", "custom", "azure", "gemini"}:
+                print(
+                    f"⚠️ [TTS CONFIG] Unsupported engine={tts_engine!r}; "
+                    "using SAPI."
+                )
+                tts_engine = "sapi"
 
             custom_voice = getattr(settings, "custom_voice", None)
             custom_voice_id = getattr(custom_voice, "id", None) if custom_voice else None
@@ -2901,4 +4278,3 @@ Return ONLY valid JSON:
     async def get_active_script(self):
         """Backward-compatible alias for older code paths."""
         return await self.get_runtime_configuration()
-

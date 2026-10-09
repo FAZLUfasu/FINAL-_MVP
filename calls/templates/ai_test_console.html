@@ -294,7 +294,7 @@ async function sendMessage(){
     addMessage(
       "assistant",
       data.reply,
-      `${data.model||"llama3.2"} • ${data.response_time_seconds ?? "?"}s`
+      `${data.model||"Gemini API"} • ${data.response_time_seconds ?? "?"}s`
     );
 
     timeBadge.textContent=`${data.response_time_seconds ?? "?"}s`;
